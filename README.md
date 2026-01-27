@@ -10,7 +10,7 @@ This project intentionally avoids BOM FTP (which is often the source of hangs/ti
 - Default run opens a looping radar GIF in `mpv`
 - Cached frame fetch + auto-pruning
 - Human-friendly loop rendering (background + labels + emoji pins)
-- Basic rain nowcast for a named location
+- Basic rain nowcast with ETA window + intensity (likely + peak)
 
 ## Prerequisites
 
@@ -136,6 +136,9 @@ bom-nowcast nowcast --frames 7 --mode local
 # Use a named location
 bom-nowcast nowcast --location Work --frames 7 --mode local
 
+# Nowcast all configured locations
+bom-nowcast nowcast --all --frames 7 --mode local
+
 # Or pass lat/lon explicitly
 bom-nowcast nowcast --lat -27.874798 --lon 153.296172 --frames 7 --mode local
 ```
@@ -143,6 +146,8 @@ bom-nowcast nowcast --lat -27.874798 --lon 153.296172 --frames 7 --mode local
 Notes:
 - `--mode local` focuses on a window around the target (better for “is it coming toward me?”)
 - `--mode global` uses the broader precip field (can be noisier)
+- ETA is shown as `X ± N` minutes (a window around the median arrival time)
+- Intensity reports a likely band plus the peak band
 
 ## Supported radars (built-in)
 

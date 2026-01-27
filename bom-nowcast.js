@@ -52,6 +52,9 @@ const UA = 'Mozilla/5.0 (Clawdbot bom-nowcast-js)';
 
 const DEFAULT_CACHE_DAYS = 3;
 const DEFAULT_LOOP_FRAMES = 7;
+const DEFAULT_ETA_MAX_MIN = 120;
+const ETA_CROSS_PX = 20;
+const INTENSITY_RADIUS_PX = 6;
 const DEFAULT_EMOJIS = ['🏠', '🏢', '🏫', '🏥', '🏖️', '🧭', '📍', '🌧️', '☂️', '🌤️', '⚡', '🚀', '⭐', '🧡', '💧', '🛰️'];
 
 function configPath() {
@@ -171,9 +174,9 @@ let _legendPalette = null;
 async function getLegendPalette() {
   // Extract a reflectivity colour palette from BOM's legend (type=0).
   // Row-scanning is brittle because the legend includes text. Instead we:
-  // 1) collect all non-greyscale colours with counts
+  // 1) collect all colours with counts (including greyscale; white=light rain, black=hail)
   // 2) keep only the high-frequency swatches (actual legend blocks)
-  // 3) sort them from "cool" → "warm" as a proxy for low→high intensity.
+  // 3) sort them from bright → dark as a proxy for low→high intensity.
   if (_legendPalette) return _legendPalette;
 
   const legend = await ensureLegend(0);
@@ -187,8 +190,6 @@ async function getLegendPalette() {
     const b = legend.data[i * 4 + 2];
     const a = legend.data[i * 4 + 3];
     if (a === 0) continue;
-    if (r > 250 && g > 250 && b > 250) continue;
-    if (isGrayish(r, g, b, 2)) continue;
 
     const k = colorKey(r, g, b);
     counts.set(k, (counts.get(k) || 0) + 1);
@@ -196,15 +197,14 @@ async function getLegendPalette() {
 
   // Keep only swatches that clearly come from the legend colour bars.
   const swatches = [...counts.entries()]
-    .filter(([, c]) => c >= 150)
+    .filter(([, c]) => c >= 120)
     .map(([k, c]) => ({ rgb: parseColorKey(k), c }));
 
-  // Sort from low→high using a simple "warmth" score.
-  // (reds/oranges/yellows should end up higher than blues/greens)
-  function score(rgb) {
-    return rgb.r * 2 + rgb.g - rgb.b;
+  // Sort from low→high intensity using luminance (white → black).
+  function luminance(rgb) {
+    return 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b;
   }
-  swatches.sort((a, b) => score(a.rgb) - score(b.rgb));
+  swatches.sort((a, b) => luminance(b.rgb) - luminance(a.rgb));
 
   const palette = swatches.map((s) => s.rgb);
   _legendPalette = palette;
@@ -351,6 +351,10 @@ function colorDistSq(a, b) {
   return dr * dr + dg * dg + db * db;
 }
 
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
 function precipMask(png) {
   // BOM radar frames include overlays (rings/labels/coast). For motion/ETA we only
   // want the precipitation blobs. Heuristic: precipitation pixels are *coloured*
@@ -371,6 +375,95 @@ function precipMask(png) {
     mask[i] = 1;
   }
   return mask;
+}
+
+function buildBandMap(png, palette) {
+  const w = png.width;
+  const h = png.height;
+  const bands = new Int16Array(w * h);
+  bands.fill(-1);
+  if (!palette || palette.length === 0) return bands;
+  for (let i = 0; i < w * h; i++) {
+    const r = png.data[i * 4 + 0];
+    const g = png.data[i * 4 + 1];
+    const b = png.data[i * 4 + 2];
+    const a = png.data[i * 4 + 3];
+    if (a === 0) continue;
+    if (isGrayish(r, g, b, 0)) continue;
+    const band = classifyIntensityBand({ r, g, b }, palette);
+    bands[i] = band;
+  }
+  return bands;
+}
+
+function percentile(sorted, p) {
+  if (!sorted.length) return null;
+  const idx = (sorted.length - 1) * p;
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return sorted[lo];
+  const w = idx - lo;
+  return sorted[lo] * (1 - w) + sorted[hi] * w;
+}
+
+function median(sorted) {
+  return percentile(sorted, 0.5);
+}
+
+function intensityFromBands(bands, paletteCount) {
+  if (!bands || bands.length === 0 || paletteCount <= 0) {
+    return { likelyBand: null, peakBand: null, likelyLabel: 'none', peakLabel: 'none' };
+  }
+  const sorted = [...bands].sort((a, b) => a - b);
+  const likelyBand = Math.round(median(sorted));
+  const peakBand = sorted[sorted.length - 1];
+  return {
+    likelyBand,
+    peakBand,
+    likelyLabel: likelyBand === null ? 'none' : bandToLabel(likelyBand, paletteCount),
+    peakLabel: peakBand === null ? 'none' : bandToLabel(peakBand, paletteCount),
+  };
+}
+
+function sampleBandsRadius(bandMap, w, tx, ty, radiusPx) {
+  const bands = [];
+  const r2 = radiusPx * radiusPx;
+  for (let y = Math.max(0, ty - radiusPx); y <= Math.min(w - 1, ty + radiusPx); y++) {
+    for (let x = Math.max(0, tx - radiusPx); x <= Math.min(w - 1, tx + radiusPx); x++) {
+      const dx = x - tx;
+      const dy = y - ty;
+      if (dx * dx + dy * dy > r2) continue;
+      const band = bandMap[y * w + x];
+      if (band >= 0) bands.push(band);
+    }
+  }
+  return bands;
+}
+
+function collectEtaCandidates(mask, bandMap, w, tx, ty, vx, vy, maxEtaMin) {
+  const v2 = vx * vx + vy * vy;
+  const vMag = Math.sqrt(v2);
+  if (vMag < 0.1) return { times: [], bands: [] };
+  const times = [];
+  const bands = [];
+  const maxEta = maxEtaMin || DEFAULT_ETA_MAX_MIN;
+  for (let i = 0; i < mask.length; i++) {
+    if (!mask[i]) continue;
+    const x = i % w;
+    const y = Math.floor(i / w);
+    const dx = tx - x;
+    const dy = ty - y;
+    const dot = dx * vx + dy * vy;
+    if (dot <= 0) continue;
+    const t = dot / v2;
+    if (t > maxEta) continue;
+    const cross = Math.abs(dx * vy - dy * vx) / vMag;
+    if (cross > ETA_CROSS_PX) continue;
+    times.push(t);
+    const band = bandMap[i];
+    if (band >= 0) bands.push(band);
+  }
+  return { times, bands };
 }
 
 function centroid(mask, w) {
@@ -740,56 +833,36 @@ function bestShift(mask0, mask1, w, box, maxShift = 25) {
   return best;
 }
 
-async function nowcast(radarId, lat, lon, frames = 6, mode = 'local') {
-  const files = await ensureFrames(radarId, Math.max(frames, 2));
-  const recent = files.slice(-frames);
-  const imgs = [];
-  for (const f of recent) imgs.push(await loadPng(f));
+function computeGlobalCentroidVelocity(masks, w, dt) {
+  const vxs = [];
+  const vys = [];
+  for (let i = 1; i < masks.length; i++) {
+    const c0 = centroid(masks[i - 1], w);
+    const c1 = centroid(masks[i], w);
+    if (c0.n < 1000 || c1.n < 1000) continue;
+    vxs.push((c1.cx - c0.cx) / dt);
+    vys.push((c1.cy - c0.cy) / dt);
+  }
+  if (!vxs.length) return { vx: 0, vy: 0 };
+  return {
+    vx: vxs.reduce((a, b) => a + b, 0) / vxs.length,
+    vy: vys.reduce((a, b) => a + b, 0) / vys.length,
+  };
+}
 
-  const w = imgs[0].width;
-  const radar = RADARS[radarId];
-  const { x: tx, y: ty, kmPerPx } = latlonToPixel(radar, lat, lon, w, w);
-
-  const masks = imgs.map(precipMask);
+function computeMotionForTarget(masks, w, targetPixel, mode, fallbackVel) {
   const last = masks[masks.length - 1];
   const prev = masks[masks.length - 2];
-
-  const rainNow = last[ty * w + tx] === 1;
-  const rainPixels = last.reduce((a, b) => a + b, 0);
-
-  // Intensity (colour-band) stats from legend.
-  const palette = await getLegendPalette();
-  const bandCounts = new Array(palette.length).fill(0);
-  let maxBand = null;
-  if (rainPixels > 0 && palette.length > 0) {
-    const pngLast = imgs[imgs.length - 1];
-    for (let i = 0; i < last.length; i++) {
-      if (!last[i]) continue;
-      const r = pngLast.data[i * 4 + 0];
-      const g = pngLast.data[i * 4 + 1];
-      const b = pngLast.data[i * 4 + 2];
-      // only classify coloured precip pixels
-      if (isGrayish(r, g, b, 0)) continue;
-      const band = classifyIntensityBand({ r, g, b }, palette);
-      bandCounts[band]++;
-      if (maxBand === null || band > maxBand) maxBand = band;
-    }
-  }
-  const maxLabel = maxBand === null ? 'none' : bandToLabel(maxBand, palette.length);
-
-  // Motion estimate:
-  // - local: use bbox of precip near target (window), robust for your "will it rain on me" use.
-  // - global: use bbox of whole precip field.
   let box = bbox(last, w);
-  if (mode === 'local') {
-    const win = 140; // px half-width window around target (tunable)
+  if (mode === 'local' && targetPixel) {
+    const { x: tx, y: ty } = targetPixel;
+    const win = 140;
     const localBox = {
       minX: Math.max(0, tx - win),
       minY: Math.max(0, ty - win),
       maxX: Math.min(w - 1, tx + win),
       maxY: Math.min(w - 1, ty + win),
     };
-    // Intersect with precip bbox to reduce empty search.
     if (box) {
       box = {
         minX: Math.max(localBox.minX, box.minX),
@@ -804,60 +877,138 @@ async function nowcast(radarId, lat, lon, frames = 6, mode = 'local') {
   }
   box = expandBox(box, w, 10);
 
-  // Find best shift from prev -> last
   const shift = bestShift(prev, last, w, box, 20);
-  const dt = 5; // minutes per frame
+  const dt = 5;
   let vx = shift.dx / dt;
   let vy = shift.dy / dt;
 
-  // Fallback: if correlation is too weak, use centroid drift over available frames.
-  if (shift.score < 300) {
-    const vxs = [], vys = [];
-    for (let i = 1; i < masks.length; i++) {
-      const c0 = centroid(masks[i - 1], w);
-      const c1 = centroid(masks[i], w);
-      if (c0.n < 1000 || c1.n < 1000) continue;
-      vxs.push((c1.cx - c0.cx) / dt);
-      vys.push((c1.cy - c0.cy) / dt);
-    }
-    if (vxs.length) {
-      vx = vxs.reduce((a, b) => a + b, 0) / vxs.length;
-      vy = vys.reduce((a, b) => a + b, 0) / vys.length;
-    }
+  if (shift.score < 300 && fallbackVel) {
+    vx = fallbackVel.vx;
+    vy = fallbackVel.vy;
   }
 
   const speed = Math.sqrt(vx * vx + vy * vy);
+  return { vx, vy, speed, shiftScore: shift.score };
+}
 
-  const distPx = nearestTrueDistance(last, w, tx, ty);
-  const etaMin = rainPixels === 0
-    ? null
-    : (rainNow ? 0 : (speed > 0.15 && isFinite(distPx) ? distPx / speed : null));
+async function nowcast(radarId, lat, lon, frames = 6, mode = 'local') {
+  const results = await nowcastLocations(radarId, { Single: { lat, lon } }, frames, mode);
+  return results.locations[0];
+}
 
-  const conf = rainPixels === 0
-    ? 0.85
-    : (etaMin !== null
-      ? Math.max(0, Math.min(1, (1 - Math.min(distPx, 200) / 200) * Math.min(1, speed / 4)))
-      : (rainNow ? 0.9 : 0.25));
+async function nowcastLocations(radarId, locations, frames = 6, mode = 'local') {
+  const files = await ensureFrames(radarId, Math.max(frames, 2));
+  const recent = files.slice(-frames);
+  const imgs = [];
+  for (const f of recent) imgs.push(await loadPng(f));
+
+  const w = imgs[0].width;
+  const radar = RADARS[radarId];
+  const masks = imgs.map(precipMask);
+  const lastMask = masks[masks.length - 1];
+  const rainPixels = lastMask.reduce((a, b) => a + b, 0);
+
+  const palette = await getLegendPalette();
+  const bandMap = buildBandMap(imgs[imgs.length - 1], palette);
+
+  const dt = 5;
+  const fallbackVel = computeGlobalCentroidVelocity(masks, w, dt);
+
+  const out = [];
+  for (const [name, locEntry] of Object.entries(locations)) {
+    if (!locEntry || typeof locEntry.lat !== 'number' || typeof locEntry.lon !== 'number') continue;
+    let targetPixel = null;
+    let kmPerPx = null;
+    try {
+      const px = latlonToPixel(radar, locEntry.lat, locEntry.lon, w, w);
+      targetPixel = { x: px.x, y: px.y };
+      kmPerPx = px.kmPerPx;
+    } catch {
+      out.push({
+        name,
+        lat: locEntry.lat,
+        lon: locEntry.lon,
+        error: 'outside radar bounds',
+      });
+      continue;
+    }
+
+    const motion = computeMotionForTarget(masks, w, targetPixel, mode, fallbackVel);
+    const { vx, vy, speed, shiftScore } = motion;
+
+    const idx = targetPixel.y * w + targetPixel.x;
+    const rainNow = lastMask[idx] === 1;
+
+    let etaMin = null;
+    let etaWindowMin = null;
+    let intensityBands = [];
+    let candidateCount = 0;
+    let spreadMin = null;
+    let localCount = 0;
+
+    if (rainNow) {
+      intensityBands = sampleBandsRadius(bandMap, w, targetPixel.x, targetPixel.y, INTENSITY_RADIUS_PX);
+      localCount = intensityBands.length;
+      etaMin = 0;
+      etaWindowMin = 0;
+    } else if (rainPixels > 0 && speed > 0.1) {
+      const { times, bands } = collectEtaCandidates(lastMask, bandMap, w, targetPixel.x, targetPixel.y, vx, vy, DEFAULT_ETA_MAX_MIN);
+      candidateCount = times.length;
+      if (times.length > 0) {
+        const sorted = [...times].sort((a, b) => a - b);
+        const p20 = percentile(sorted, 0.2);
+        const p80 = percentile(sorted, 0.8);
+        const med = median(sorted);
+        etaMin = med;
+        spreadMin = p20 !== null && p80 !== null ? (p80 - p20) : null;
+        const window = spreadMin === null ? 0 : Math.round(spreadMin / 2);
+        etaWindowMin = Math.max(2, window);
+      }
+      intensityBands = bands;
+    }
+
+    const intensity = intensityFromBands(intensityBands, palette.length);
+    const spreadForConf = spreadMin === null ? 60 : spreadMin;
+    let confidence = 0;
+    if (rainNow) {
+      const localQuality = clamp(localCount / 20, 0, 1);
+      confidence = clamp(0.6 + 0.4 * localQuality, 0, 1);
+    } else if (candidateCount > 0 && speed > 0.1) {
+      const motionQuality = clamp(shiftScore / 800, 0, 1);
+      const speedQuality = clamp(speed / 2.5, 0, 1);
+      const countQuality = clamp(candidateCount / 400, 0, 1);
+      const spreadQuality = 1 - clamp(spreadForConf / 30, 0, 1);
+      confidence = clamp(
+        0.35 * motionQuality + 0.25 * speedQuality + 0.25 * countQuality + 0.15 * spreadQuality,
+        0,
+        1
+      );
+    }
+
+    out.push({
+      name,
+      lat: locEntry.lat,
+      lon: locEntry.lon,
+      targetPixel,
+      kmPerPx,
+      rainNow,
+      rainPixels,
+      etaMin,
+      etaWindowMin,
+      intensity,
+      confidence,
+      motionPxPerMin: { vx, vy },
+      motionKmPerMin: { vx: vx * kmPerPx, vy: vy * kmPerPx },
+      debug: { shiftScore, candidateCount },
+    });
+  }
 
   return {
     radarId,
     radarName: radar.name,
     mode,
-    targetPixel: { x: tx, y: ty },
-    kmPerPx,
-    rainNow,
-    rainPixels,
-    intensity: {
-      paletteSize: palette.length,
-      maxBand,
-      maxLabel,
-      bandCounts,
-    },
-    etaMin,
-    confidence: conf,
-    motionPxPerMin: { vx, vy },
-    motionKmPerMin: { vx: vx * kmPerPx, vy: vy * kmPerPx },
-    debug: { shiftScore: shift.score },
+    frames,
+    locations: out,
   };
 }
 
@@ -968,6 +1119,7 @@ program
   .option('--lat <lat>')
   .option('--lon <lon>')
   .option('--location <name>', 'Location name from config (defaults to defaultLocation)')
+  .option('--all', 'Nowcast for all configured locations')
   .option('--radar <id>', 'Preferred radar (auto fallback)', null)
   .option('--frames <n>', 'Frames to use', '6')
   .option('--mode <mode>', 'local|global motion estimate (default: local)', 'local')
@@ -978,28 +1130,48 @@ program
     const n = parseInt(opts.frames, 10);
     const mode = opts.mode;
 
-    let lat = opts.lat !== undefined ? parseFloat(opts.lat) : null;
-    let lon = opts.lon !== undefined ? parseFloat(opts.lon) : null;
+    let locations = {};
+    const lat = opts.lat !== undefined ? parseFloat(opts.lat) : null;
+    const lon = opts.lon !== undefined ? parseFloat(opts.lon) : null;
 
-    if (lat === null || lon === null) {
+    if (lat !== null && lon !== null) {
+      locations = { Custom: { lat, lon } };
+    } else if (opts.all) {
+      locations = cfg.locations || {};
+    } else {
       const locName = opts.location || cfg.defaultLocation;
       const loc = getLocation(cfg, locName);
       if (!loc) throw new Error(`Unknown location: ${locName}. Run: node bom-nowcast.js locations`);
-      lat = loc.lat;
-      lon = loc.lon;
+      locations = { [locName]: loc };
     }
 
-    const r = await nowcast(chosen, lat, lon, n, mode);
+    const r = await nowcastLocations(chosen, locations, n, mode);
 
     console.log(`radar: ${r.radarId} (${r.radarName})`);
     console.log(`mode: ${r.mode}`);
-    console.log(`rain_pixels: ${r.rainPixels}`);
-    console.log(`rain_now: ${r.rainNow}`);
-    console.log(`intensity: ${r.intensity.maxLabel}${r.intensity.maxBand === null ? '' : ` (band ${r.intensity.maxBand+1}/${r.intensity.paletteSize})`}`);
-    console.log(`eta_min: ${r.etaMin === null ? 'none' : Math.round(r.etaMin)}`);
-    console.log(`confidence: ${r.confidence.toFixed(2)}`);
-    console.log(`motion_px_per_min: vx=${r.motionPxPerMin.vx.toFixed(2)} vy=${r.motionPxPerMin.vy.toFixed(2)}`);
-    console.log(`motion_km_per_min: vx=${r.motionKmPerMin.vx.toFixed(2)} vy=${r.motionKmPerMin.vy.toFixed(2)}`);
+    console.log(`frames: ${r.frames}`);
+
+    for (const loc of r.locations) {
+      console.log('');
+      console.log(`location: ${loc.name}`);
+      if (loc.error) {
+        console.log(`error: ${loc.error}`);
+        continue;
+      }
+      console.log(`rain_now: ${loc.rainNow}`);
+      if (loc.etaMin === null) {
+        console.log('eta_min: none');
+      } else if (loc.etaWindowMin === 0) {
+        console.log('eta_min: now');
+      } else {
+        console.log(`eta_min: ${Math.round(loc.etaMin)} ±${loc.etaWindowMin}`);
+      }
+      const intensityText = loc.intensity.likelyLabel === loc.intensity.peakLabel
+        ? loc.intensity.likelyLabel
+        : `${loc.intensity.likelyLabel} (peak ${loc.intensity.peakLabel})`;
+      console.log(`intensity: ${intensityText}`);
+      console.log(`confidence: ${Math.round(loc.confidence * 100)}%`);
+    }
   });
 
 if (process.argv.length <= 2) {
