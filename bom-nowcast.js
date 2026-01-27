@@ -74,6 +74,92 @@ const INTENSITY_ORDER_HEX = [
   '#280000',
 ];
 
+const ASCII_LOGO = [
+  ' ____   ___  __  __       _   _  _____        ______    _    ____ _____ ',
+  '| __ ) / _ \\|  \\/  |     | \\ | |/ _ \\ \\      / / ___|  / \\  / ___|_   _|',
+  '|  _ \\| | | | |\\/| |_____|  \\| | | | \\ \\ /\\ / / |     / _ \\ \\___ \\ | |  ',
+  '| |_) | |_| | |  | |_____| |\\  | |_| |\\ V  V /| |___ / ___ \\ ___) || |  ',
+  '|____/ \\___/|_|  |_|     |_| \\_|\\___/  \\_/\\_/  \\____/_/   \\_\\____/ |_|  ',
+  '                                                                        ',
+];
+
+const TERM = {
+  reset: '\x1b[0m',
+  bold: '\x1b[1m',
+  dim: '\x1b[2m',
+  cyan: '\x1b[36m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  red: '\x1b[31m',
+  magenta: '\x1b[35m',
+  blue: '\x1b[34m',
+};
+
+function termWidth() {
+  const w = output.isTTY ? output.columns : 80;
+  if (!w || Number.isNaN(w)) return 80;
+  return Math.max(60, Math.min(w, 120));
+}
+
+function colorize(code, text) {
+  if (!output.isTTY) return text;
+  return `${code}${text}${TERM.reset}`;
+}
+
+function dim(text) {
+  return colorize(TERM.dim, text);
+}
+
+function bold(text) {
+  return colorize(TERM.bold, text);
+}
+
+function hr(char = '─') {
+  return dim(char.repeat(termWidth()));
+}
+
+function printLogo() {
+  if (!output.isTTY) return;
+  const w = termWidth();
+  const widest = ASCII_LOGO.reduce((m, l) => Math.max(m, l.length), 0);
+  if (widest + 4 > w) return;
+  for (const line of ASCII_LOGO) {
+    console.log(colorize(TERM.cyan, line));
+  }
+  console.log(dim('Radar nowcast • BOM loop frames'));
+  console.log(hr());
+}
+
+function fmtKv(icon, label, value, color = TERM.reset) {
+  const key = `${icon} ${label}`;
+  const padded = key.padEnd(18, ' ');
+  return `${dim(padded)}${colorize(color, value)}`;
+}
+
+function fmtStatus(label, ok) {
+  return ok ? colorize(TERM.green, label) : colorize(TERM.yellow, label);
+}
+
+function formatEta(etaMin, etaWindowMin) {
+  if (etaMin === null) return colorize(TERM.dim, 'none');
+  if (etaWindowMin === 0) return colorize(TERM.green, 'now');
+  return `${colorize(TERM.cyan, Math.round(etaMin).toString())} ${dim(`±${etaWindowMin} min`)}`;
+}
+
+function formatIntensity(intensity) {
+  if (!intensity) return colorize(TERM.dim, 'none');
+  const likely = intensity.likelyLabel || 'none';
+  const peak = intensity.peakLabel || 'none';
+  if (likely === peak) return colorize(TERM.yellow, likely);
+  return `${colorize(TERM.yellow, likely)} ${dim(`(peak ${peak})`)}`;
+}
+
+function formatConfidence(confidence) {
+  const pct = Math.round((confidence || 0) * 100);
+  const color = pct >= 70 ? TERM.green : pct >= 40 ? TERM.yellow : TERM.red;
+  return colorize(color, `${pct}%`);
+}
+
 function configPath() {
   // XDG-ish: ~/.config/bom-nowcast/config.json
   return path.join(os.homedir(), '.config', 'bom-nowcast', 'config.json');
@@ -720,7 +806,10 @@ async function runSetup() {
     return def;
   };
 
-  console.log('\nSetup: bom-nowcast\n');
+  console.log('');
+  printLogo();
+  console.log(bold('Setup'));
+  console.log('');
   console.log('Available radars:');
   for (const [id, r] of Object.entries(RADARS)) {
     console.log(`- ${id}: ${r.name}`);
@@ -786,15 +875,43 @@ async function runDefault() {
 
   const preferred = cfg.defaultRadar || 'IDR663';
   const chosen = await pickRadar(preferred);
+  const defaultLoc = cfg.defaultLocation;
+  const loc = getLocation(cfg, defaultLoc);
+
+  if (loc) {
+    const now = await nowcastLocations(chosen, { [defaultLoc]: loc }, DEFAULT_LOOP_FRAMES, 'local');
+    const entry = now.locations[0];
+    printLogo();
+    console.log(bold(`Nowcast`));
+    console.log(fmtKv('📡', 'Radar', `${now.radarId} — ${now.radarName}`, TERM.blue));
+    console.log(fmtKv('🧭', 'Mode', now.mode, TERM.magenta));
+    console.log(fmtKv('🧪', 'Frames', `${now.frames}`, TERM.magenta));
+    console.log(hr());
+    console.log(bold(`📍 ${entry.name}`));
+    if (entry.error) {
+      console.log(fmtKv('⚠️', 'Error', entry.error, TERM.yellow));
+    } else {
+      const rainLabel = entry.rainNow ? fmtStatus('raining', true) : fmtStatus('dry', false);
+      console.log(fmtKv('🌧️', 'Status', rainLabel));
+      console.log(fmtKv('⏱️', 'ETA', formatEta(entry.etaMin, entry.etaWindowMin)));
+      console.log(fmtKv('🎚️', 'Intensity', formatIntensity(entry.intensity)));
+      console.log(fmtKv('✅', 'Confidence', formatConfidence(entry.confidence)));
+    }
+    console.log('');
+  }
+
   const outGif = path.join('/tmp', 'bom-nowcast-loop.gif');
   await renderLoopGif(chosen, DEFAULT_LOOP_FRAMES, outGif, cfg.locations || {}, cfg.cacheDays);
 
   if (!hasCommand('mpv')) {
-    console.log(`mpv not found. Open manually: ${outGif}`);
+    console.log(fmtKv('🎬', 'Player', 'mpv not found', TERM.yellow));
+    console.log(fmtKv('📁', 'Loop', outGif, TERM.cyan));
     return;
   }
 
   const { spawn } = require('child_process');
+  console.log(fmtKv('🎬', 'Player', 'opening mpv (looping)', TERM.green));
+  console.log(fmtKv('📁', 'Loop', outGif, TERM.cyan));
   const mpv = spawn('mpv', ['--loop=inf', outGif], { stdio: 'inherit' });
   await new Promise((resolve, reject) => {
     mpv.on('exit', resolve);
@@ -1199,30 +1316,24 @@ program
 
     const r = await nowcastLocations(chosen, locations, n, mode);
 
-    console.log(`radar: ${r.radarId} (${r.radarName})`);
-    console.log(`mode: ${r.mode}`);
-    console.log(`frames: ${r.frames}`);
+    printLogo();
+    console.log(bold('Nowcast'));
+    console.log(fmtKv('📡', 'Radar', `${r.radarId} — ${r.radarName}`, TERM.blue));
+    console.log(fmtKv('🧭', 'Mode', r.mode, TERM.magenta));
+    console.log(fmtKv('🧪', 'Frames', `${r.frames}`, TERM.magenta));
 
     for (const loc of r.locations) {
-      console.log('');
-      console.log(`location: ${loc.name}`);
+      console.log(hr());
+      console.log(bold(`📍 ${loc.name}`));
       if (loc.error) {
-        console.log(`error: ${loc.error}`);
+        console.log(fmtKv('⚠️', 'Error', loc.error, TERM.yellow));
         continue;
       }
-      console.log(`rain_now: ${loc.rainNow}`);
-      if (loc.etaMin === null) {
-        console.log('eta_min: none');
-      } else if (loc.etaWindowMin === 0) {
-        console.log('eta_min: now');
-      } else {
-        console.log(`eta_min: ${Math.round(loc.etaMin)} ±${loc.etaWindowMin}`);
-      }
-      const intensityText = loc.intensity.likelyLabel === loc.intensity.peakLabel
-        ? loc.intensity.likelyLabel
-        : `${loc.intensity.likelyLabel} (peak ${loc.intensity.peakLabel})`;
-      console.log(`intensity: ${intensityText}`);
-      console.log(`confidence: ${Math.round(loc.confidence * 100)}%`);
+      const rainLabel = loc.rainNow ? fmtStatus('raining', true) : fmtStatus('dry', false);
+      console.log(fmtKv('🌧️', 'Status', rainLabel));
+      console.log(fmtKv('⏱️', 'ETA', formatEta(loc.etaMin, loc.etaWindowMin)));
+      console.log(fmtKv('🎚️', 'Intensity', formatIntensity(loc.intensity)));
+      console.log(fmtKv('✅', 'Confidence', formatConfidence(loc.confidence)));
     }
   });
 
