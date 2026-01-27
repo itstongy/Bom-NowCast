@@ -160,6 +160,10 @@ function formatConfidence(confidence) {
   return colorize(color, `${pct}%`);
 }
 
+function noRainMessage() {
+  return colorize(TERM.green, 'No rain detected nearby — no ETA needed.');
+}
+
 function configPath() {
   // XDG-ish: ~/.config/bom-nowcast/config.json
   return path.join(os.homedir(), '.config', 'bom-nowcast', 'config.json');
@@ -893,9 +897,13 @@ async function runDefault() {
     } else {
       const rainLabel = entry.rainNow ? fmtStatus('raining', true) : fmtStatus('dry', false);
       console.log(fmtKv('🌧️', 'Status', rainLabel));
-      console.log(fmtKv('⏱️', 'ETA', formatEta(entry.etaMin, entry.etaWindowMin)));
-      console.log(fmtKv('🎚️', 'Intensity', formatIntensity(entry.intensity)));
-      console.log(fmtKv('✅', 'Confidence', formatConfidence(entry.confidence)));
+      if (!entry.rainNow && entry.etaMin === null) {
+        console.log(fmtKv('✅', 'Forecast', noRainMessage()));
+      } else {
+        console.log(fmtKv('⏱️', 'ETA', formatEta(entry.etaMin, entry.etaWindowMin)));
+        console.log(fmtKv('🎚️', 'Intensity', formatIntensity(entry.intensity)));
+        console.log(fmtKv('✅', 'Confidence', formatConfidence(entry.confidence)));
+      }
     }
     console.log('');
   }
@@ -1331,9 +1339,13 @@ program
       }
       const rainLabel = loc.rainNow ? fmtStatus('raining', true) : fmtStatus('dry', false);
       console.log(fmtKv('🌧️', 'Status', rainLabel));
-      console.log(fmtKv('⏱️', 'ETA', formatEta(loc.etaMin, loc.etaWindowMin)));
-      console.log(fmtKv('🎚️', 'Intensity', formatIntensity(loc.intensity)));
-      console.log(fmtKv('✅', 'Confidence', formatConfidence(loc.confidence)));
+      if (!loc.rainNow && loc.etaMin === null) {
+        console.log(fmtKv('✅', 'Forecast', noRainMessage()));
+      } else {
+        console.log(fmtKv('⏱️', 'ETA', formatEta(loc.etaMin, loc.etaWindowMin)));
+        console.log(fmtKv('🎚️', 'Intensity', formatIntensity(loc.intensity)));
+        console.log(fmtKv('✅', 'Confidence', formatConfidence(loc.confidence)));
+      }
     }
   });
 
