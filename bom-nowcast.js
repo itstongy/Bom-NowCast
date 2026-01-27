@@ -14,6 +14,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const https = require('https');
+const readline = require('readline/promises');
+const { stdin: input, stdout: output } = require('process');
 const { Command } = require('commander');
 const { PNG } = require('pngjs');
 
@@ -49,6 +51,7 @@ function alphaOver(dst, src) {
 const UA = 'Mozilla/5.0 (Clawdbot bom-nowcast-js)';
 
 const DEFAULT_CACHE_DAYS = 3;
+const DEFAULT_LOOP_FRAMES = 7;
 const DEFAULT_EMOJIS = ['🏠', '🏢', '🏫', '🏥', '🏖️', '🧭', '📍', '🌧️', '☂️', '🌤️', '⚡', '🚀', '⭐', '🧡', '💧', '🛰️'];
 
 function configPath() {
@@ -93,8 +96,14 @@ function getLocation(cfg, name) {
 }
 
 const RADARS = {
-  IDR663: { name: 'Brisbane (Mt Stapylton) 128km', radarLat: -27.718, radarLon: 153.240, radiusKm: 128, loopUrl: 'https://reg.bom.gov.au/products/IDR663.loop.shtml' },
-  IDR503: { name: 'Brisbane (Marburg) 128km', radarLat: -27.61, radarLon: 152.54, radiusKm: 128, loopUrl: 'https://reg.bom.gov.au/products/IDR503.loop.shtml' },
+  IDR663: { name: 'Brisbane (Mt Stapylton)', radarLat: -27.718, radarLon: 153.240, radiusKm: 128, loopUrl: 'https://reg.bom.gov.au/products/IDR663.loop.shtml' },
+  IDR503: { name: 'Brisbane (Marburg)', radarLat: -27.61, radarLon: 152.54, radiusKm: 128, loopUrl: 'https://reg.bom.gov.au/products/IDR503.loop.shtml' },
+  IDR713: { name: 'Sydney (Terrey Hills)', radarLat: -33.707, radarLon: 151.210, radiusKm: 128, loopUrl: 'https://reg.bom.gov.au/products/IDR713.loop.shtml' },
+  IDR023: { name: 'Melbourne (Laverton)', radarLat: -37.855, radarLon: 144.752, radiusKm: 128, loopUrl: 'https://reg.bom.gov.au/products/IDR023.loop.shtml' },
+  IDR643: { name: 'Adelaide (Buckland Park)', radarLat: -34.615, radarLon: 138.469, radiusKm: 128, loopUrl: 'https://reg.bom.gov.au/products/IDR643.loop.shtml' },
+  IDR703: { name: 'Perth (Serpentine)', radarLat: -32.404, radarLon: 115.977, radiusKm: 128, loopUrl: 'https://reg.bom.gov.au/products/IDR703.loop.shtml' },
+  IDR633: { name: 'Darwin (Berrimah)', radarLat: -12.457, radarLon: 130.926, radiusKm: 128, loopUrl: 'https://reg.bom.gov.au/products/IDR633.loop.shtml' },
+  IDR763: { name: 'Hobart (Mt Koonya)', radarLat: -42.881, radarLon: 147.330, radiusKm: 128, loopUrl: 'https://reg.bom.gov.au/products/IDR763.loop.shtml' },
 };
 
 function cacheDir() {
@@ -505,6 +514,149 @@ function resolveLocationEmoji(name, loc) {
   return DEFAULT_EMOJIS[idx];
 }
 
+function hasCommand(cmd) {
+  const { execSync } = require('child_process');
+  try {
+    execSync(`command -v ${cmd}`, { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function renderLoopGif(radarId, frameCount, outGif, locations, cacheDays) {
+  const n = parseInt(frameCount, 10);
+  const files = await ensureFrames(radarId, n, cacheDays || DEFAULT_CACHE_DAYS);
+  const recent = files.slice(-n);
+
+  const outDir = '/tmp/bom-nowcast-render';
+  fs.mkdirSync(outDir, { recursive: true });
+
+  const rendered = [];
+  for (const f of recent) {
+    const frame = await renderCompositeFrame(radarId, f, locations || {});
+    const outPng = path.join(outDir, path.basename(f));
+    fs.writeFileSync(outPng, PNG.sync.write(frame));
+    rendered.push(outPng);
+  }
+
+  // Build GIF via ImageMagick if available.
+  const { execSync } = require('child_process');
+  try {
+    execSync(`magick -delay 70 -loop 0 ${rendered.map((p)=>`"${p}"`).join(' ')} "${outGif}"`);
+  } catch {
+    execSync(`convert -delay 70 -loop 0 ${rendered.map((p)=>`"${p}"`).join(' ')} "${outGif}"`);
+  }
+
+  return outGif;
+}
+
+async function runSetup() {
+  const existing = loadConfig() || defaultConfig();
+  const rl = readline.createInterface({ input, output });
+  const ask = async (label, def) => {
+    const suffix = def !== undefined && def !== null && def !== '' ? ` [${def}]` : '';
+    const ans = (await rl.question(`${label}${suffix}: `)).trim();
+    return ans === '' ? def : ans;
+  };
+  const askNumber = async (label, def) => {
+    while (true) {
+      const raw = await ask(label, def);
+      const num = parseFloat(raw);
+      if (!Number.isNaN(num) && Number.isFinite(num)) return num;
+      console.log('Please enter a valid number.');
+    }
+  };
+  const askYesNo = async (label, def = true) => {
+    const hint = def ? 'Y/n' : 'y/N';
+    const raw = (await ask(`${label} (${hint})`, def ? 'y' : 'n')).toLowerCase();
+    if (['y', 'yes'].includes(raw)) return true;
+    if (['n', 'no'].includes(raw)) return false;
+    return def;
+  };
+
+  console.log('\nSetup: bom-nowcast\n');
+  console.log('Available radars:');
+  for (const [id, r] of Object.entries(RADARS)) {
+    console.log(`- ${id}: ${r.name}`);
+  }
+
+  let radarId = await ask('Default radar ID', existing.defaultRadar || 'IDR663');
+  while (!RADARS[radarId]) {
+    console.log('Please enter a supported radar ID from the list above.');
+    radarId = await ask('Default radar ID', existing.defaultRadar || 'IDR663');
+  }
+
+  const existingDefaultName = existing.defaultLocation || 'Default';
+  const existingDefaultLoc = getLocation(existing, existingDefaultName) || defaultConfig().locations.Default;
+
+  const defaultName = await ask('Default location name', existingDefaultName);
+  const defaultLat = await askNumber('Default location latitude', existingDefaultLoc.lat);
+  const defaultLon = await askNumber('Default location longitude', existingDefaultLoc.lon);
+  const emojiHint = DEFAULT_EMOJIS.join(' ');
+  const defaultEmoji = await ask(`Default location emoji (examples: ${emojiHint})`, existingDefaultLoc.emoji || '');
+
+  const cfg = {
+    version: existing.version || 1,
+    defaultRadar: radarId,
+    cacheDays: existing.cacheDays || DEFAULT_CACHE_DAYS,
+    defaultLocation: defaultName,
+    locations: { ...(existing.locations || {}) },
+  };
+
+  cfg.locations[defaultName] = {
+    lat: defaultLat,
+    lon: defaultLon,
+    emoji: defaultEmoji || existingDefaultLoc.emoji,
+  };
+
+  while (await askYesNo('Add another location pin', false)) {
+    const name = await ask('Location name', '');
+    if (!name) {
+      console.log('Skipping empty name.');
+      continue;
+    }
+    const lat = await askNumber('Latitude', '');
+    const lon = await askNumber('Longitude', '');
+    const emoji = await ask(`Emoji for ${name}`, resolveLocationEmoji(name, cfg.locations[name]));
+    cfg.locations[name] = { lat, lon, emoji };
+  }
+
+  saveConfig(cfg);
+  rl.close();
+  console.log(`\nSaved config: ${configPath()}`);
+  return cfg;
+}
+
+async function runDefault() {
+  let cfg = loadConfig();
+  if (!cfg) {
+    console.log('No config found. Starting setup...\n');
+    cfg = await runSetup();
+  }
+  if (!cfg.defaultRadar || !cfg.defaultLocation || !getLocation(cfg, cfg.defaultLocation)) {
+    console.log('Config incomplete. Starting setup...\n');
+    cfg = await runSetup();
+  }
+
+  const preferred = cfg.defaultRadar || 'IDR663';
+  const chosen = await pickRadar(preferred);
+  const outGif = path.join('/tmp', 'bom-nowcast-loop.gif');
+  await renderLoopGif(chosen, DEFAULT_LOOP_FRAMES, outGif, cfg.locations || {}, cfg.cacheDays);
+
+  if (!hasCommand('mpv')) {
+    console.log(`mpv not found. Open manually: ${outGif}`);
+    return;
+  }
+
+  const { spawn } = require('child_process');
+  const mpv = spawn('mpv', ['--loop=inf', outGif], { stdio: 'inherit' });
+  await new Promise((resolve, reject) => {
+    mpv.on('exit', resolve);
+    mpv.on('error', reject);
+  });
+}
+
 async function renderCompositeFrame(radarId, framePath, locations = {}) {
   // Compose: background -> radar frame -> locations (place names) -> location emojis.
   const bg = await ensureOverlay(radarId, 'background');
@@ -715,6 +867,13 @@ program
   .description('BOM radar frame fetch + crude rain nowcast (Mt Stapylton primary, Marburg fallback)');
 
 program
+  .command('setup')
+  .description('Interactive setup (radar + default location + emoji pins)')
+  .action(async () => {
+    await runSetup();
+  });
+
+program
   .command('radars')
   .description('List known radars')
   .action(() => {
@@ -797,29 +956,7 @@ program
     const cfg = loadConfig() || defaultConfig();
     const preferred = opts.radar || cfg.defaultRadar || 'IDR663';
     const chosen = await pickRadar(preferred);
-    const n = parseInt(opts.frames, 10);
-    const files = await ensureFrames(chosen, n, cfg.cacheDays || DEFAULT_CACHE_DAYS);
-    const recent = files.slice(-n);
-
-    const outDir = '/tmp/bom-nowcast-render';
-    fs.mkdirSync(outDir, { recursive: true });
-
-    const rendered = [];
-    for (const f of recent) {
-      const frame = await renderCompositeFrame(chosen, f, cfg.locations || {});
-      const outPng = path.join(outDir, path.basename(f));
-      fs.writeFileSync(outPng, PNG.sync.write(frame));
-      rendered.push(outPng);
-    }
-
-    // Build GIF via ImageMagick if available.
-    const { execSync } = require('child_process');
-    const outGif = opts.out;
-    try {
-      execSync(`magick -delay 70 -loop 0 ${rendered.map((p)=>`"${p}"`).join(' ')} "${outGif}"`);
-    } catch {
-      execSync(`convert -delay 70 -loop 0 ${rendered.map((p)=>`"${p}"`).join(' ')} "${outGif}"`);
-    }
+    const outGif = await renderLoopGif(chosen, opts.frames, opts.out, cfg.locations || {}, cfg.cacheDays);
 
     console.log(`radar: ${chosen} (${RADARS[chosen].name})`);
     console.log(`loop: ${outGif}`);
@@ -865,7 +1002,14 @@ program
     console.log(`motion_km_per_min: vx=${r.motionKmPerMin.vx.toFixed(2)} vy=${r.motionKmPerMin.vy.toFixed(2)}`);
   });
 
-program.parseAsync(process.argv).catch((e) => {
-  console.error(e.message || e);
-  process.exit(1);
-});
+if (process.argv.length <= 2) {
+  runDefault().catch((e) => {
+    console.error(e.message || e);
+    process.exit(1);
+  });
+} else {
+  program.parseAsync(process.argv).catch((e) => {
+    console.error(e.message || e);
+    process.exit(1);
+  });
+}
