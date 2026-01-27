@@ -920,7 +920,8 @@ async function runDefault() {
   const { spawn } = require('child_process');
   console.log(fmtKv('🎬', 'Player', 'opening mpv (looping)', TERM.green));
   console.log(fmtKv('📁', 'Loop', outGif, TERM.cyan));
-  const mpv = spawn('mpv', ['--loop=inf', outGif], { stdio: 'inherit' });
+  const mpvArgs = ['--loop=inf', '--no-terminal', '--quiet', outGif];
+  const mpv = spawn('mpv', mpvArgs, { stdio: ['ignore', 'ignore', 'ignore'] });
   await new Promise((resolve, reject) => {
     mpv.on('exit', resolve);
     mpv.on('error', reject);
