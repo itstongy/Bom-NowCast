@@ -178,6 +178,23 @@ We keep **machine-readable** frames separate from **human-readable** composites:
 - Machine-readable: raw timestamped PNG frames from the loop page (best for analysis)
 - Human-readable: composited frames (background + labels) for GIF output
 
+## FAQ
+
+**Is this an official BOM tool?**  
+No. It’s a community CLI that uses public Bureau of Meteorology loop pages over HTTPS.
+
+**Does it use BOM FTP?**  
+No. It avoids FTP and downloads the timestamped PNG frames from the loop pages.
+
+**What platforms are supported?**  
+Anywhere Node.js runs. ImageMagick and `mpv` are optional helpers for GIFs and playback.
+
+**Which radar should I choose?**  
+Pick the radar closest to your area from `bom-nowcast radars`.
+
+**Can I run it without a GUI?**  
+Yes. Use `fetch` and `nowcast` only, or write GIFs to a file path and view later.
+
 ## References
 
 - BOM loop pages: https://reg.bom.gov.au/products/
