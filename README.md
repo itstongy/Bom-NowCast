@@ -1,10 +1,10 @@
-# bom-nowcast
+# bom-nowcast — BOM radar CLI + nowcast
 
-A small CLI for fetching BOM radar frames, rendering a human-friendly loop with emoji pins, and running a basic nowcast.
+A fast, friendly **BOM radar CLI** for Australia: fetch Bureau of Meteorology radar frames, render a readable loop with emoji pins, and run a lightweight rain nowcast from your terminal.
 
 This project intentionally avoids BOM FTP (which is often the source of hangs/timeouts) and instead scrapes the BOM **loop pages** and downloads the timestamped PNG frames over HTTPS.
 
-![BOM Nowcast screenshot](assets/screenshot.png)
+![BOM Nowcast CLI screenshot](assets/screenshot.png)
 
 ## Features
 
@@ -14,6 +14,14 @@ This project intentionally avoids BOM FTP (which is often the source of hangs/ti
 - Human-friendly loop rendering (background + labels + emoji pins)
 - Basic rain nowcast with ETA window + intensity (likely + peak)
 - Intensity ordering follows the BOM legend (white = light rain, black = hail)
+
+## Why this CLI?
+
+- **BOM radar from the terminal**: quick checks without opening a browser
+- **Australia-focused**: uses Bureau of Meteorology loop pages over HTTPS
+- **Readable output**: labels + context map + emoji pins for locations
+
+If you searched for *bom cli radar*, *Bureau of Meteorology radar CLI*, *Australian weather radar command line*, or *BOM radar GIF*, this is the tool.
 
 ## Prerequisites
 
