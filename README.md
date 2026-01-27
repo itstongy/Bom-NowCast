@@ -4,6 +4,8 @@ A small CLI for fetching BOM radar frames, rendering a human-friendly loop with 
 
 This project intentionally avoids BOM FTP (which is often the source of hangs/timeouts) and instead scrapes the BOM **loop pages** and downloads the timestamped PNG frames over HTTPS.
 
+![BOM Nowcast screenshot](assets/screenshot.png)
+
 ## Features
 
 - Interactive setup (choose radar, set your default location, add emoji pins)
