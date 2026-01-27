@@ -92,6 +92,75 @@ async function ensureLegend(type = 0) {
   return PNG.sync.read(fs.readFileSync(out));
 }
 
+let _legendPalette = null;
+
+async function getLegendPalette() {
+  // Extract a reflectivity colour palette from BOM's legend (type=0).
+  // Row-scanning is brittle because the legend includes text. Instead we:
+  // 1) collect all non-greyscale colours with counts
+  // 2) keep only the high-frequency swatches (actual legend blocks)
+  // 3) sort them from "cool" → "warm" as a proxy for low→high intensity.
+  if (_legendPalette) return _legendPalette;
+
+  const legend = await ensureLegend(0);
+  const w = legend.width;
+  const h = legend.height;
+
+  const counts = new Map();
+  for (let i = 0; i < w * h; i++) {
+    const r = legend.data[i * 4 + 0];
+    const g = legend.data[i * 4 + 1];
+    const b = legend.data[i * 4 + 2];
+    const a = legend.data[i * 4 + 3];
+    if (a === 0) continue;
+    if (r > 250 && g > 250 && b > 250) continue;
+    if (isGrayish(r, g, b, 2)) continue;
+
+    const k = colorKey(r, g, b);
+    counts.set(k, (counts.get(k) || 0) + 1);
+  }
+
+  // Keep only swatches that clearly come from the legend colour bars.
+  const swatches = [...counts.entries()]
+    .filter(([, c]) => c >= 150)
+    .map(([k, c]) => ({ rgb: parseColorKey(k), c }));
+
+  // Sort from low→high using a simple "warmth" score.
+  // (reds/oranges/yellows should end up higher than blues/greens)
+  function score(rgb) {
+    return rgb.r * 2 + rgb.g - rgb.b;
+  }
+  swatches.sort((a, b) => score(a.rgb) - score(b.rgb));
+
+  const palette = swatches.map((s) => s.rgb);
+  _legendPalette = palette;
+  return palette;
+}
+
+function classifyIntensityBand(rgb, palette) {
+  // Return palette index of the nearest legend colour.
+  // Lower index = lower intensity (as ordered in legend image top->bottom).
+  let bestI = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < palette.length; i++) {
+    const d = colorDistSq(rgb, palette[i]);
+    if (d < bestD) {
+      bestD = d;
+      bestI = i;
+    }
+  }
+  return bestI;
+}
+
+function bandToLabel(band, bandCount) {
+  if (bandCount <= 1) return 'unknown';
+  const t = band / (bandCount - 1);
+  if (t < 0.34) return 'light';
+  if (t < 0.67) return 'moderate';
+  if (t < 0.90) return 'heavy';
+  return 'very heavy';
+}
+
 function httpGet(url) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, { headers: { 'User-Agent': UA } }, (res) => {
@@ -188,10 +257,30 @@ function latlonToPixel({ radarLat, radarLon, radiusKm }, targetLat, targetLon, w
   return { x, y, kmPerPx };
 }
 
+function isGrayish(r, g, b, tol = 0) {
+  return Math.abs(r - g) <= tol && Math.abs(g - b) <= tol && Math.abs(r - b) <= tol;
+}
+
+function colorKey(r, g, b) {
+  return `${r},${g},${b}`;
+}
+
+function parseColorKey(k) {
+  const [r, g, b] = k.split(',').map((x) => parseInt(x, 10));
+  return { r, g, b };
+}
+
+function colorDistSq(a, b) {
+  const dr = a.r - b.r;
+  const dg = a.g - b.g;
+  const db = a.b - b.b;
+  return dr * dr + dg * dg + db * db;
+}
+
 function precipMask(png) {
-  // BOM composite PNGs contain lots of opaque overlays (coastlines, labels, rings).
-  // We want *precip* only. Heuristic: precip pixels are colored (not grayscale)
-  // and non-transparent.
+  // BOM radar frames include overlays (rings/labels/coast). For motion/ETA we only
+  // want the precipitation blobs. Heuristic: precipitation pixels are *coloured*
+  // (not greyscale) and opaque.
   const w = png.width;
   const h = png.height;
   const mask = new Uint8Array(w * h);
@@ -202,9 +291,7 @@ function precipMask(png) {
     const a = png.data[i * 4 + 3];
 
     if (a === 0) continue;
-
-    // ignore grayscale overlays (rings/labels/coast): r==g==b
-    if (r === g && g === b) continue;
+    if (isGrayish(r, g, b, 0)) continue;
 
     // otherwise treat as precip
     mask[i] = 1;
@@ -346,6 +433,26 @@ async function nowcast(radarId, lat, lon, frames = 6, mode = 'local') {
   const rainNow = last[ty * w + tx] === 1;
   const rainPixels = last.reduce((a, b) => a + b, 0);
 
+  // Intensity (colour-band) stats from legend.
+  const palette = await getLegendPalette();
+  const bandCounts = new Array(palette.length).fill(0);
+  let maxBand = null;
+  if (rainPixels > 0 && palette.length > 0) {
+    const pngLast = imgs[imgs.length - 1];
+    for (let i = 0; i < last.length; i++) {
+      if (!last[i]) continue;
+      const r = pngLast.data[i * 4 + 0];
+      const g = pngLast.data[i * 4 + 1];
+      const b = pngLast.data[i * 4 + 2];
+      // only classify coloured precip pixels
+      if (isGrayish(r, g, b, 0)) continue;
+      const band = classifyIntensityBand({ r, g, b }, palette);
+      bandCounts[band]++;
+      if (maxBand === null || band > maxBand) maxBand = band;
+    }
+  }
+  const maxLabel = maxBand === null ? 'none' : bandToLabel(maxBand, palette.length);
+
   // Motion estimate:
   // - local: use bbox of precip near target (window), robust for your "will it rain on me" use.
   // - global: use bbox of whole precip field.
@@ -416,6 +523,12 @@ async function nowcast(radarId, lat, lon, frames = 6, mode = 'local') {
     kmPerPx,
     rainNow,
     rainPixels,
+    intensity: {
+      paletteSize: palette.length,
+      maxBand,
+      maxLabel,
+      bandCounts,
+    },
     etaMin,
     confidence: conf,
     motionPxPerMin: { vx, vy },
@@ -507,6 +620,7 @@ program
     console.log(`mode: ${r.mode}`);
     console.log(`rain_pixels: ${r.rainPixels}`);
     console.log(`rain_now: ${r.rainNow}`);
+    console.log(`intensity: ${r.intensity.maxLabel}${r.intensity.maxBand === null ? '' : ` (band ${r.intensity.maxBand+1}/${r.intensity.paletteSize})`}`);
     console.log(`eta_min: ${r.etaMin === null ? 'none' : Math.round(r.etaMin)}`);
     console.log(`confidence: ${r.confidence.toFixed(2)}`);
     console.log(`motion_px_per_min: vx=${r.motionPxPerMin.vx.toFixed(2)} vy=${r.motionPxPerMin.vy.toFixed(2)}`);
