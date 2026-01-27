@@ -47,6 +47,12 @@ Add a location:
 node bom-nowcast.js location-add --name Work --lat -27.XXXX --lon 153.XXXX
 ```
 
+Add a location with an emoji marker:
+
+```bash
+node bom-nowcast.js location-add --name Work --lat -27.XXXX --lon 153.XXXX --emoji 🧭
+```
+
 Set a location as the default:
 
 ```bash
@@ -71,25 +77,19 @@ Cache location:
 
 - `~/.cache/bom-nowcast/<RADAR_ID>/`
 
-### Build a human-friendly radar loop GIF (with map underlay + labels + your location dot)
+### Build a human-friendly radar loop GIF (with map underlay + labels + location emojis)
 
 This renders each frame as:
 
 1) BOM background underlay
 2) the timestamped radar frame
 3) BOM place-name labels
-4) a **red dot** at your configured location
+4) **emoji markers** for all configured locations
 
 Then creates a GIF.
 
 ```bash
 node bom-nowcast.js loop --radar IDR663 --frames 7 --out /tmp/bom-nowcast-context.gif
-```
-
-Choose a location:
-
-```bash
-node bom-nowcast.js loop --location Work --out /tmp/bom-nowcast-work.gif
 ```
 
 Open it:

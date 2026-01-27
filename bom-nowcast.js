@@ -49,6 +49,7 @@ function alphaOver(dst, src) {
 const UA = 'Mozilla/5.0 (Clawdbot bom-nowcast-js)';
 
 const DEFAULT_CACHE_DAYS = 3;
+const DEFAULT_EMOJIS = ['🏠', '🏢', '🏫', '🏥', '🏖️', '🧭', '📍', '🌧️', '☂️', '🌤️', '⚡', '🚀', '⭐', '🧡', '💧', '🛰️'];
 
 function configPath() {
   // XDG-ish: ~/.config/bom-nowcast/config.json
@@ -119,6 +120,10 @@ function pruneCache(dir, maxAgeDays) {
 
 function overlayDir() {
   return path.join(cacheDir(), '_overlays');
+}
+
+function emojiDir() {
+  return path.join(cacheDir(), '_emoji');
 }
 
 async function fetchPng(url) {
@@ -412,26 +417,96 @@ async function ensureFrames(radarId, count, cacheDays = DEFAULT_CACHE_DAYS) {
   return chosen.map((f) => path.join(dir, f.file));
 }
 
-function drawDot(png, x, y, radius = 4, rgba = { r: 255, g: 0, b: 0, a: 255 }) {
-  const w = png.width;
-  const h = png.height;
-  for (let dy = -radius; dy <= radius; dy++) {
-    for (let dx = -radius; dx <= radius; dx++) {
-      if (dx * dx + dy * dy > radius * radius) continue;
-      const xx = x + dx;
-      const yy = y + dy;
-      if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
-      const i = (yy * w + xx) * 4;
-      png.data[i] = rgba.r;
-      png.data[i + 1] = rgba.g;
-      png.data[i + 2] = rgba.b;
-      png.data[i + 3] = rgba.a;
+function alphaOverAt(dst, src, x0, y0) {
+  for (let y = 0; y < src.height; y++) {
+    const yy = y0 + y;
+    if (yy < 0 || yy >= dst.height) continue;
+    for (let x = 0; x < src.width; x++) {
+      const xx = x0 + x;
+      if (xx < 0 || xx >= dst.width) continue;
+      const di = (yy * dst.width + xx) * 4;
+      const si = (y * src.width + x) * 4;
+
+      const sr = src.data[si];
+      const sg = src.data[si + 1];
+      const sb = src.data[si + 2];
+      const sa = src.data[si + 3] / 255;
+      if (sa === 0) continue;
+
+      const dr = dst.data[di];
+      const dg = dst.data[di + 1];
+      const db = dst.data[di + 2];
+      const da = dst.data[di + 3] / 255;
+
+      const outA = sa + da * (1 - sa);
+      const outR = (sr * sa + dr * da * (1 - sa)) / (outA || 1);
+      const outG = (sg * sa + dg * da * (1 - sa)) / (outA || 1);
+      const outB = (sb * sa + db * da * (1 - sa)) / (outA || 1);
+
+      dst.data[di] = Math.round(outR);
+      dst.data[di + 1] = Math.round(outG);
+      dst.data[di + 2] = Math.round(outB);
+      dst.data[di + 3] = Math.round(outA * 255);
     }
   }
 }
 
-async function renderCompositeFrame(radarId, framePath, markerLatLon = null) {
-  // Compose: background -> radar frame -> locations (place names) -> marker dot.
+function scalePng(src, size) {
+  const out = new PNG({ width: size, height: size });
+  for (let y = 0; y < size; y++) {
+    const sy = Math.floor((y / size) * src.height);
+    for (let x = 0; x < size; x++) {
+      const sx = Math.floor((x / size) * src.width);
+      const si = (sy * src.width + sx) * 4;
+      const di = (y * size + x) * 4;
+      out.data[di] = src.data[si];
+      out.data[di + 1] = src.data[si + 1];
+      out.data[di + 2] = src.data[si + 2];
+      out.data[di + 3] = src.data[si + 3];
+    }
+  }
+  return out;
+}
+
+function emojiToCodepoints(emoji) {
+  return Array.from(emoji).map((ch) => ch.codePointAt(0).toString(16)).join('-');
+}
+
+const emojiPngCache = new Map();
+
+async function ensureEmojiPng(emoji) {
+  if (emojiPngCache.has(emoji)) return emojiPngCache.get(emoji);
+  const dir = emojiDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const code = emojiToCodepoints(emoji);
+  const file = `${code}.png`;
+  const out = path.join(dir, file);
+  if (!fs.existsSync(out)) {
+    const url = `https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/${file}`;
+    const data = await httpGet(url);
+    fs.writeFileSync(out, data);
+  }
+  const png = PNG.sync.read(fs.readFileSync(out));
+  emojiPngCache.set(emoji, png);
+  return png;
+}
+
+function hashString(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = (h * 31 + s.charCodeAt(i)) | 0;
+  }
+  return h;
+}
+
+function resolveLocationEmoji(name, loc) {
+  if (loc && loc.emoji) return loc.emoji;
+  const idx = Math.abs(hashString(name)) % DEFAULT_EMOJIS.length;
+  return DEFAULT_EMOJIS[idx];
+}
+
+async function renderCompositeFrame(radarId, framePath, locations = {}) {
+  // Compose: background -> radar frame -> locations (place names) -> location emojis.
   const bg = await ensureOverlay(radarId, 'background');
   const loc = await ensureOverlay(radarId, 'locations');
 
@@ -443,9 +518,22 @@ async function renderCompositeFrame(radarId, framePath, markerLatLon = null) {
   alphaOver(out, radar);
   if (loc.width === out.width && loc.height === out.height) alphaOver(out, loc);
 
-  if (markerLatLon) {
-    const { x, y } = latlonToPixel(RADARS[radarId], markerLatLon.lat, markerLatLon.lon, out.width, out.height);
-    drawDot(out, x, y, 4, { r: 255, g: 0, b: 0, a: 255 });
+  const entries = Object.entries(locations || {});
+  if (entries.length > 0) {
+    const size = 14;
+    const radar = RADARS[radarId];
+    for (const [name, locEntry] of entries) {
+      if (!locEntry || typeof locEntry.lat !== 'number' || typeof locEntry.lon !== 'number') continue;
+      try {
+        const { x, y } = latlonToPixel(radar, locEntry.lat, locEntry.lon, out.width, out.height);
+        const emoji = resolveLocationEmoji(name, locEntry);
+        const emojiPng = await ensureEmojiPng(emoji);
+        const scaled = scalePng(emojiPng, size);
+        alphaOverAt(out, scaled, x - Math.floor(size / 2), y - Math.floor(size / 2));
+      } catch {
+        // ignore locations outside radar bounds
+      }
+    }
   }
 
   return out;
@@ -657,7 +745,8 @@ program
     const def = cfg.defaultLocation;
     for (const [name, v] of Object.entries(cfg.locations || {})) {
       const mark = name === def ? '*' : ' ';
-      console.log(`${mark} ${name}: ${v.lat}, ${v.lon}`);
+      const emoji = resolveLocationEmoji(name, v);
+      console.log(`${mark} ${emoji} ${name}: ${v.lat}, ${v.lon}`);
     }
   });
 
@@ -667,11 +756,16 @@ program
   .requiredOption('--name <name>')
   .requiredOption('--lat <lat>')
   .requiredOption('--lon <lon>')
+  .option('--emoji <emoji>', 'Optional emoji marker for this location')
   .option('--set-default', 'Also set as default location')
   .action((opts) => {
     const cfg = loadConfig() || defaultConfig();
     cfg.locations = cfg.locations || {};
-    cfg.locations[opts.name] = { lat: parseFloat(opts.lat), lon: parseFloat(opts.lon) };
+    cfg.locations[opts.name] = {
+      lat: parseFloat(opts.lat),
+      lon: parseFloat(opts.lon),
+      emoji: opts.emoji || cfg.locations[opts.name]?.emoji,
+    };
     if (opts.setDefault) cfg.defaultLocation = opts.name;
     saveConfig(cfg);
     console.log(`Saved location ${opts.name} to ${configPath()}`);
@@ -695,11 +789,10 @@ program
 
 program
   .command('loop')
-  .description('Render a geographic-context loop GIF (background + frames + labels + optional location dot)')
+  .description('Render a geographic-context loop GIF (background + frames + labels + location emojis)')
   .option('--radar <id>', 'Preferred radar (auto fallback)', null)
   .option('--frames <n>', 'Frames to include', '7')
   .option('--out <path>', 'Output gif path', '/tmp/bom-nowcast-loop.gif')
-  .option('--location <name>', 'Location name from config (defaults to defaultLocation)')
   .action(async (opts) => {
     const cfg = loadConfig() || defaultConfig();
     const preferred = opts.radar || cfg.defaultRadar || 'IDR663';
@@ -708,15 +801,12 @@ program
     const files = await ensureFrames(chosen, n, cfg.cacheDays || DEFAULT_CACHE_DAYS);
     const recent = files.slice(-n);
 
-    const locName = opts.location || cfg.defaultLocation;
-    const loc = getLocation(cfg, locName);
-
     const outDir = '/tmp/bom-nowcast-render';
     fs.mkdirSync(outDir, { recursive: true });
 
     const rendered = [];
     for (const f of recent) {
-      const frame = await renderCompositeFrame(chosen, f, loc);
+      const frame = await renderCompositeFrame(chosen, f, cfg.locations || {});
       const outPng = path.join(outDir, path.basename(f));
       fs.writeFileSync(outPng, PNG.sync.write(frame));
       rendered.push(outPng);
