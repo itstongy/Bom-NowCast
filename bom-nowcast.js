@@ -48,6 +48,49 @@ function alphaOver(dst, src) {
 
 const UA = 'Mozilla/5.0 (Clawdbot bom-nowcast-js)';
 
+const DEFAULT_CACHE_DAYS = 3;
+
+function configPath() {
+  // XDG-ish: ~/.config/bom-nowcast/config.json
+  return path.join(os.homedir(), '.config', 'bom-nowcast', 'config.json');
+}
+
+function loadConfig() {
+  const p = configPath();
+  if (!fs.existsSync(p)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function saveConfig(cfg) {
+  const p = configPath();
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(cfg, null, 2));
+}
+
+function defaultConfig() {
+  return {
+    version: 1,
+    defaultRadar: 'IDR663',
+    cacheDays: DEFAULT_CACHE_DAYS,
+    defaultLocation: 'Default',
+    locations: {
+      Default: {
+        lat: -27.874798,
+        lon: 153.296172,
+      },
+    },
+  };
+}
+
+function getLocation(cfg, name) {
+  if (!cfg || !cfg.locations) return null;
+  return cfg.locations[name] || null;
+}
+
 const RADARS = {
   IDR663: { name: 'Brisbane (Mt Stapylton) 128km', radarLat: -27.718, radarLon: 153.240, radiusKm: 128, loopUrl: 'https://reg.bom.gov.au/products/IDR663.loop.shtml' },
   IDR503: { name: 'Brisbane (Marburg) 128km', radarLat: -27.61, radarLon: 152.54, radiusKm: 128, loopUrl: 'https://reg.bom.gov.au/products/IDR503.loop.shtml' },
@@ -55,6 +98,23 @@ const RADARS = {
 
 function cacheDir() {
   return path.join(os.homedir(), '.cache', 'bom-nowcast');
+}
+
+function pruneCache(dir, maxAgeDays) {
+  if (!fs.existsSync(dir)) return;
+  const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+  for (const name of fs.readdirSync(dir)) {
+    const p = path.join(dir, name);
+    if (!name.endsWith('.png')) continue;
+    try {
+      const st = fs.statSync(p);
+      if (st.mtimeMs < cutoff) {
+        fs.unlinkSync(p);
+      }
+    } catch {
+      // ignore
+    }
+  }
 }
 
 function overlayDir() {
@@ -334,9 +394,13 @@ async function loadPng(filePath) {
   return PNG.sync.read(buf);
 }
 
-async function ensureFrames(radarId, count) {
+async function ensureFrames(radarId, count, cacheDays = DEFAULT_CACHE_DAYS) {
   const dir = path.join(cacheDir(), radarId);
   fs.mkdirSync(dir, { recursive: true });
+
+  // prune old cached frames to keep disk usage bounded
+  pruneCache(dir, cacheDays);
+
   const frames = await scrapeFrames(radarId);
   const chosen = frames.slice(-count);
   for (const f of chosen) {
@@ -348,9 +412,26 @@ async function ensureFrames(radarId, count) {
   return chosen.map((f) => path.join(dir, f.file));
 }
 
-async function renderCompositeFrame(radarId, framePath) {
-  // Compose: background -> radar frame -> locations (place names).
-  // This gives you geographic context.
+function drawDot(png, x, y, radius = 4, rgba = { r: 255, g: 0, b: 0, a: 255 }) {
+  const w = png.width;
+  const h = png.height;
+  for (let dy = -radius; dy <= radius; dy++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      if (dx * dx + dy * dy > radius * radius) continue;
+      const xx = x + dx;
+      const yy = y + dy;
+      if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+      const i = (yy * w + xx) * 4;
+      png.data[i] = rgba.r;
+      png.data[i + 1] = rgba.g;
+      png.data[i + 2] = rgba.b;
+      png.data[i + 3] = rgba.a;
+    }
+  }
+}
+
+async function renderCompositeFrame(radarId, framePath, markerLatLon = null) {
+  // Compose: background -> radar frame -> locations (place names) -> marker dot.
   const bg = await ensureOverlay(radarId, 'background');
   const loc = await ensureOverlay(radarId, 'locations');
 
@@ -358,11 +439,14 @@ async function renderCompositeFrame(radarId, framePath) {
   const out = new PNG({ width: radar.width, height: radar.height });
   out.data.fill(0);
 
-  // Some overlays are smaller than the radar frame; Mt Stapylton background is 512x512 (matches).
-  // If mismatch: skip that overlay.
   if (bg.width === out.width && bg.height === out.height) alphaOver(out, bg);
   alphaOver(out, radar);
   if (loc.width === out.width && loc.height === out.height) alphaOver(out, loc);
+
+  if (markerLatLon) {
+    const { x, y } = latlonToPixel(RADARS[radarId], markerLatLon.lat, markerLatLon.lon, out.width, out.height);
+    drawDot(out, x, y, 4, { r: 255, g: 0, b: 0, a: 255 });
+  }
 
   return out;
 }
@@ -552,36 +636,87 @@ program
   });
 
 program
+  .command('config-init')
+  .description('Create default config file if missing (~/.config/bom-nowcast/config.json)')
+  .action(() => {
+    const existing = loadConfig();
+    if (existing) {
+      console.log(`Config already exists: ${configPath()}`);
+      return;
+    }
+    const cfg = defaultConfig();
+    saveConfig(cfg);
+    console.log(`Wrote config: ${configPath()}`);
+  });
+
+program
+  .command('locations')
+  .description('List configured locations')
+  .action(() => {
+    const cfg = loadConfig() || defaultConfig();
+    const def = cfg.defaultLocation;
+    for (const [name, v] of Object.entries(cfg.locations || {})) {
+      const mark = name === def ? '*' : ' ';
+      console.log(`${mark} ${name}: ${v.lat}, ${v.lon}`);
+    }
+  });
+
+program
+  .command('location-add')
+  .description('Add/update a named location in config')
+  .requiredOption('--name <name>')
+  .requiredOption('--lat <lat>')
+  .requiredOption('--lon <lon>')
+  .option('--set-default', 'Also set as default location')
+  .action((opts) => {
+    const cfg = loadConfig() || defaultConfig();
+    cfg.locations = cfg.locations || {};
+    cfg.locations[opts.name] = { lat: parseFloat(opts.lat), lon: parseFloat(opts.lon) };
+    if (opts.setDefault) cfg.defaultLocation = opts.name;
+    saveConfig(cfg);
+    console.log(`Saved location ${opts.name} to ${configPath()}`);
+  });
+
+program
   .command('fetch')
   .description('Fetch latest radar frames into cache')
-  .option('--radar <id>', 'Radar product id (IDR663/IDR503)', 'IDR663')
+  .option('--radar <id>', 'Radar product id (IDR663/IDR503)', null)
   .option('--frames <n>', 'Number of frames', '10')
   .action(async (opts) => {
-    const chosen = await pickRadar(opts.radar);
+    const cfg = loadConfig() || defaultConfig();
+    const preferred = opts.radar || cfg.defaultRadar || 'IDR663';
+    const chosen = await pickRadar(preferred);
     const n = parseInt(opts.frames, 10);
-    const files = await ensureFrames(chosen, n);
+    const files = await ensureFrames(chosen, n, cfg.cacheDays || DEFAULT_CACHE_DAYS);
     console.log(`radar: ${chosen} (${RADARS[chosen].name})`);
     console.log(`saved: ${files.length} frames -> ${path.join(cacheDir(), chosen)}`);
+    console.log(`cache_prune_days: ${cfg.cacheDays || DEFAULT_CACHE_DAYS}`);
   });
 
 program
   .command('loop')
-  .description('Render a geographic-context loop GIF (background + frames + labels)')
-  .option('--radar <id>', 'Preferred radar (auto fallback)', 'IDR663')
+  .description('Render a geographic-context loop GIF (background + frames + labels + optional location dot)')
+  .option('--radar <id>', 'Preferred radar (auto fallback)', null)
   .option('--frames <n>', 'Frames to include', '7')
   .option('--out <path>', 'Output gif path', '/tmp/bom-nowcast-loop.gif')
+  .option('--location <name>', 'Location name from config (defaults to defaultLocation)')
   .action(async (opts) => {
-    const chosen = await pickRadar(opts.radar);
+    const cfg = loadConfig() || defaultConfig();
+    const preferred = opts.radar || cfg.defaultRadar || 'IDR663';
+    const chosen = await pickRadar(preferred);
     const n = parseInt(opts.frames, 10);
-    const files = await ensureFrames(chosen, n);
+    const files = await ensureFrames(chosen, n, cfg.cacheDays || DEFAULT_CACHE_DAYS);
     const recent = files.slice(-n);
+
+    const locName = opts.location || cfg.defaultLocation;
+    const loc = getLocation(cfg, locName);
 
     const outDir = '/tmp/bom-nowcast-render';
     fs.mkdirSync(outDir, { recursive: true });
 
     const rendered = [];
     for (const f of recent) {
-      const frame = await renderCompositeFrame(chosen, f);
+      const frame = await renderCompositeFrame(chosen, f, loc);
       const outPng = path.join(outDir, path.basename(f));
       fs.writeFileSync(outPng, PNG.sync.write(frame));
       rendered.push(outPng);
@@ -602,18 +737,31 @@ program
 
 program
   .command('nowcast')
-  .description('Nowcast rain for a target lat/lon')
-  .requiredOption('--lat <lat>')
-  .requiredOption('--lon <lon>')
-  .option('--radar <id>', 'Preferred radar (auto fallback)', 'IDR663')
+  .description('Nowcast rain for a target lat/lon (or a named location from config)')
+  .option('--lat <lat>')
+  .option('--lon <lon>')
+  .option('--location <name>', 'Location name from config (defaults to defaultLocation)')
+  .option('--radar <id>', 'Preferred radar (auto fallback)', null)
   .option('--frames <n>', 'Frames to use', '6')
   .option('--mode <mode>', 'local|global motion estimate (default: local)', 'local')
   .action(async (opts) => {
-    const lat = parseFloat(opts.lat);
-    const lon = parseFloat(opts.lon);
+    const cfg = loadConfig() || defaultConfig();
+    const preferred = opts.radar || cfg.defaultRadar || 'IDR663';
+    const chosen = await pickRadar(preferred);
     const n = parseInt(opts.frames, 10);
     const mode = opts.mode;
-    const chosen = await pickRadar(opts.radar);
+
+    let lat = opts.lat !== undefined ? parseFloat(opts.lat) : null;
+    let lon = opts.lon !== undefined ? parseFloat(opts.lon) : null;
+
+    if (lat === null || lon === null) {
+      const locName = opts.location || cfg.defaultLocation;
+      const loc = getLocation(cfg, locName);
+      if (!loc) throw new Error(`Unknown location: ${locName}. Run: node bom-nowcast.js locations`);
+      lat = loc.lat;
+      lon = loc.lon;
+    }
+
     const r = await nowcast(chosen, lat, lon, n, mode);
 
     console.log(`radar: ${r.radarId} (${r.radarName})`);

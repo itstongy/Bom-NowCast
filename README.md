@@ -19,15 +19,49 @@ npm install
 
 ## Commands
 
+### Initial setup (config + default location)
+
+This tool reads config from:
+
+- `~/.config/bom-nowcast/config.json`
+
+Create it (only needed once):
+
+```bash
+node bom-nowcast.js config-init
+```
+
+The default config includes a `Default` location. (You can edit the JSON directly or use the commands below.)
+
+### Locations (home/work/uni)
+
+List locations:
+
+```bash
+node bom-nowcast.js locations
+```
+
+Add a location:
+
+```bash
+node bom-nowcast.js location-add --name Work --lat -27.XXXX --lon 153.XXXX
+```
+
+Set a location as the default:
+
+```bash
+node bom-nowcast.js location-add --name Default --lat -27.874798 --lon 153.296172 --set-default
+```
+
 ### List supported radars
 
 ```bash
 node bom-nowcast.js radars
 ```
 
-### Fetch latest frames (cached)
+### Fetch latest frames (cached + auto-prune)
 
-Fetches and caches the most recent frames for a radar product.
+Fetches and caches the most recent frames for a radar product. Old cached frames are automatically deleted (default: 3 days).
 
 ```bash
 node bom-nowcast.js fetch --radar IDR663 --frames 10
@@ -37,18 +71,25 @@ Cache location:
 
 - `~/.cache/bom-nowcast/<RADAR_ID>/`
 
-### Build a human-friendly radar loop GIF (with map underlay + labels)
+### Build a human-friendly radar loop GIF (with map underlay + labels + your location dot)
 
 This renders each frame as:
 
 1) BOM background underlay
 2) the timestamped radar frame
 3) BOM place-name labels
+4) a **red dot** at your configured location
 
 Then creates a GIF.
 
 ```bash
 node bom-nowcast.js loop --radar IDR663 --frames 7 --out /tmp/bom-nowcast-context.gif
+```
+
+Choose a location:
+
+```bash
+node bom-nowcast.js loop --location Work --out /tmp/bom-nowcast-work.gif
 ```
 
 Open it:
@@ -59,15 +100,20 @@ open /tmp/bom-nowcast-context.gif
 
 ### Nowcast (MVP)
 
-This currently returns a basic analysis for a target lat/lon:
+Nowcast supports either:
 
-- whether precipitation is currently over the target pixel
-- a crude ETA (only when motion is detectable)
-- a confidence score
+- a named location from your config (recommended), or
+- an explicit `--lat/--lon`
 
 ```bash
-# Oxenford approx
-node bom-nowcast.js nowcast --lat -27.89033 --lon 153.3131 --frames 7 --mode local
+# Use your default configured location
+node bom-nowcast.js nowcast --frames 7 --mode local
+
+# Use a named location
+node bom-nowcast.js nowcast --location Work --frames 7 --mode local
+
+# Or pass lat/lon explicitly
+node bom-nowcast.js nowcast --lat -27.874798 --lon 153.296172 --frames 7 --mode local
 ```
 
 Notes:
