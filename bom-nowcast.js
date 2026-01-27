@@ -56,6 +56,23 @@ const DEFAULT_ETA_MAX_MIN = 120;
 const ETA_CROSS_PX = 20;
 const INTENSITY_RADIUS_PX = 6;
 const DEFAULT_EMOJIS = ['🏠', '🏢', '🏫', '🏥', '🏖️', '🧭', '📍', '🌧️', '☂️', '🌤️', '⚡', '🚀', '⭐', '🧡', '💧', '🛰️'];
+const INTENSITY_ORDER_HEX = [
+  '#F5F5FF',
+  '#B4B4FF',
+  '#7878FF',
+  '#1414FF',
+  '#00D8C3',
+  '#009690',
+  '#066',
+  '#FF0',
+  '#FFC800',
+  '#FF9600',
+  '#FF6400',
+  '#F00',
+  '#C80000',
+  '#780000',
+  '#280000',
+];
 
 function configPath() {
   // XDG-ish: ~/.config/bom-nowcast/config.json
@@ -176,7 +193,7 @@ async function getLegendPalette() {
   // Row-scanning is brittle because the legend includes text. Instead we:
   // 1) collect all colours with counts (including greyscale; white=light rain, black=hail)
   // 2) keep only the high-frequency swatches (actual legend blocks)
-  // 3) sort them from bright → dark as a proxy for low→high intensity.
+  // 3) sort them by the known intensity ordering from the legend image.
   if (_legendPalette) return _legendPalette;
 
   const legend = await ensureLegend(0);
@@ -200,11 +217,14 @@ async function getLegendPalette() {
     .filter(([, c]) => c >= 120)
     .map(([k, c]) => ({ rgb: parseColorKey(k), c }));
 
-  // Sort from low→high intensity using luminance (white → black).
-  function luminance(rgb) {
-    return 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b;
-  }
-  swatches.sort((a, b) => luminance(b.rgb) - luminance(a.rgb));
+  // Sort from low→high intensity using the legend's ordered swatches.
+  const orderRgb = INTENSITY_ORDER_HEX.map(hexToRgb);
+  swatches.sort((a, b) => {
+    const aIdx = nearestOrderIndex(a.rgb, orderRgb);
+    const bIdx = nearestOrderIndex(b.rgb, orderRgb);
+    if (aIdx !== bIdx) return aIdx - bIdx;
+    return colorDistSq(a.rgb, orderRgb[aIdx]) - colorDistSq(b.rgb, orderRgb[bIdx]);
+  });
 
   const palette = swatches.map((s) => s.rgb);
   _legendPalette = palette;
@@ -349,6 +369,38 @@ function colorDistSq(a, b) {
   const dg = a.g - b.g;
   const db = a.b - b.b;
   return dr * dr + dg * dg + db * db;
+}
+
+function hexToRgb(hex) {
+  const clean = hex.replace('#', '');
+  if (clean.length === 3) {
+    return {
+      r: parseInt(clean[0] + clean[0], 16),
+      g: parseInt(clean[1] + clean[1], 16),
+      b: parseInt(clean[2] + clean[2], 16),
+    };
+  }
+  if (clean.length === 6) {
+    return {
+      r: parseInt(clean.slice(0, 2), 16),
+      g: parseInt(clean.slice(2, 4), 16),
+      b: parseInt(clean.slice(4, 6), 16),
+    };
+  }
+  return { r: 0, g: 0, b: 0 };
+}
+
+function nearestOrderIndex(rgb, order) {
+  let bestI = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < order.length; i++) {
+    const d = colorDistSq(rgb, order[i]);
+    if (d < bestD) {
+      bestD = d;
+      bestI = i;
+    }
+  }
+  return bestI;
 }
 
 function clamp(v, min, max) {

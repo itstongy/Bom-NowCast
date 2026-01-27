@@ -11,6 +11,7 @@ This project intentionally avoids BOM FTP (which is often the source of hangs/ti
 - Cached frame fetch + auto-pruning
 - Human-friendly loop rendering (background + labels + emoji pins)
 - Basic rain nowcast with ETA window + intensity (likely + peak)
+- Intensity ordering follows the BOM legend (white = light rain, black = hail)
 
 ## Prerequisites
 
