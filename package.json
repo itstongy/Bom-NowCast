@@ -24,7 +24,7 @@
     "gif"
   ],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "type": "commonjs",
   "dependencies": {
     "commander": "^14.0.2",
