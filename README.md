@@ -162,7 +162,8 @@ Notes:
 
 ## Supported radars (built-in)
 
-- IDR663 — Brisbane (Mt Stapylton)
+- IDR664 — Brisbane (Mt Stapylton 64 km)
+- IDR663 — Brisbane (Mt Stapylton 128 km)
 - IDR503 — Brisbane (Marburg)
 - IDR713 — Sydney (Terrey Hills)
 - IDR023 — Melbourne (Laverton)

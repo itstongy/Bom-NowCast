@@ -6,7 +6,7 @@
  * Fetches BOM radar frames from reg.bom.gov.au loop pages and does a crude
  * motion/proximity nowcast for a target lat/lon.
  *
- * Primary: Mt Stapylton (IDR663)
+ * Primary: Mt Stapylton 64 km (IDR664)
  * Fallback: Marburg (IDR503)
  */
 
@@ -188,7 +188,7 @@ function saveConfig(cfg) {
 function defaultConfig() {
   return {
     version: 1,
-    defaultRadar: 'IDR663',
+    defaultRadar: 'IDR664',
     cacheDays: DEFAULT_CACHE_DAYS,
     defaultLocation: 'Default',
     locations: {
@@ -206,6 +206,7 @@ function getLocation(cfg, name) {
 }
 
 const RADARS = {
+  IDR664: { name: 'Brisbane (Mt Stapylton 64 km)', radarLat: -27.718, radarLon: 153.240, radiusKm: 64, loopUrl: 'https://reg.bom.gov.au/products/IDR664.loop.shtml' },
   IDR663: { name: 'Brisbane (Mt Stapylton)', radarLat: -27.718, radarLon: 153.240, radiusKm: 128, loopUrl: 'https://reg.bom.gov.au/products/IDR663.loop.shtml' },
   IDR503: { name: 'Brisbane (Marburg)', radarLat: -27.61, radarLon: 152.54, radiusKm: 128, loopUrl: 'https://reg.bom.gov.au/products/IDR503.loop.shtml' },
   IDR713: { name: 'Sydney (Terrey Hills)', radarLat: -33.707, radarLon: 151.210, radiusKm: 128, loopUrl: 'https://reg.bom.gov.au/products/IDR713.loop.shtml' },
