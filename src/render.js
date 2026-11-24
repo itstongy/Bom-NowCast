@@ -253,12 +253,17 @@ function formatLocalTimeLabel(tsMs) {
 }
 
 function shouldIncludeForecast(opts) {
-  if (opts.forecast === false) return false;
+  return opts.forecast !== false;
+}
+
+function resolveForecastVelocity(opts) {
   const m = opts.forecastMotion;
-  if (!m || !m.motionReliable) return false;
-  if ((m.rainPixels || 0) < 100) return false;
-  const speed = Math.hypot(m.vx || 0, m.vy || 0);
-  return speed >= 0.15;
+  if (!m || !m.motionReliable || (m.rainPixels || 0) < 40) {
+    return { vx: 0, vy: 0 };
+  }
+  const vx = Number.isFinite(m.vx) ? m.vx : 0;
+  const vy = Number.isFinite(m.vy) ? m.vy : 0;
+  return { vx, vy };
 }
 
 function buildDelaysCs(historyCount, forecastCount, delayMs, holdMs) {
@@ -346,8 +351,9 @@ function getLoopCachePath(radarId, frameEntries, locations = {}, opts = {}) {
   const useForecast = shouldIncludeForecast(opts);
   const forecastCount = useForecast ? FORECAST_LEADS_MIN.length : 0;
   const delaysCs = buildDelaysCs(frameEntries.length, forecastCount, opts.delayMs, opts.holdMs);
+  const forecastVel = resolveForecastVelocity(opts);
   const motionKey = useForecast
-    ? `fcst:${opts.forecastMotion.vx.toFixed(2)},${opts.forecastMotion.vy.toFixed(2)}`
+    ? `fcst:${forecastVel.vx.toFixed(2)},${forecastVel.vy.toFixed(2)}`
     : 'nofcst';
   const tzOffset = new Date().getTimezoneOffset();
   const framesSig = crypto
@@ -453,7 +459,7 @@ async function renderLoopGifFromFrames(radarId, frameEntries, outGif, locations 
         ? decodedImgs[lastIdx]
         : readPngFile(frameEntries[lastIdx].path);
       const lastTsMs = frameEntries[lastIdx].tsMs;
-      const { vx, vy } = opts.forecastMotion;
+      const { vx, vy } = resolveForecastVelocity(opts);
 
       for (let f = 0; f < FORECAST_LEADS_MIN.length; f++) {
         const leadMin = FORECAST_LEADS_MIN[f];

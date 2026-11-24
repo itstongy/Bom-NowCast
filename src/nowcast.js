@@ -418,11 +418,14 @@ function computeMotionForTarget(masks, frames, lastBbox, w, targetPixel, mode, g
   const trackInBox = (searchBox) => {
     const valid = [];
     let latestScore = 0;
+    const rainInBox = countRainInBox(last, w, searchBox);
+    // Allow smaller isolated showers to track cleanly when relative overlap is solid (>=12% and >=40 px).
+    const minScore = Math.min(150, Math.max(40, Math.round(rainInBox * 0.12)));
     for (let i = pairStart; i <= pairEnd; i++) {
       const dt = computeFrameDeltaMin(frames[i - 1], frames[i]);
       const shift = bestShift(masks[i - 1], masks[i], w, searchBox, 20);
       if (i === pairEnd) latestScore = shift.score;
-      if (shift.score >= 150) {
+      if (shift.score >= minScore) {
         valid.push({
           vx: shift.dx / dt,
           vy: shift.dy / dt,
@@ -430,10 +433,10 @@ function computeMotionForTarget(masks, frames, lastBbox, w, targetPixel, mode, g
         });
       }
     }
-    return { valid, latestScore };
+    return { valid, latestScore, minScore };
   };
 
-  let { valid, latestScore } = trackInBox(box);
+  let { valid, latestScore, minScore } = trackInBox(box);
 
   // If local window had weak overlap, widen once to the full rain bounding box before falling back to centroid.
   if (valid.length === 0 && mode === 'local' && lastBbox) {
@@ -446,7 +449,7 @@ function computeMotionForTarget(masks, frames, lastBbox, w, targetPixel, mode, g
       globalBox.maxY !== box.maxY
     ) {
       box = globalBox;
-      ({ valid, latestScore } = trackInBox(box));
+      ({ valid, latestScore, minScore } = trackInBox(box));
     }
   }
 
@@ -462,15 +465,22 @@ function computeMotionForTarget(masks, frames, lastBbox, w, targetPixel, mode, g
     vy = median(vys);
     shiftScore = Math.max(latestScore, Math.round(valid.reduce((s, v) => s + v.score, 0) / valid.length));
     motionReliable = true;
-  } else if (valid.length === 1 && valid[0].score >= 250) {
+  } else if (valid.length === 1 && valid[0].score >= Math.max(minScore * 1.5, 90)) {
     vx = valid[0].vx;
     vy = valid[0].vy;
     shiftScore = valid[0].score;
     motionReliable = true;
   } else {
     const fb = getFallbackVel();
-    vx = fb.vx;
-    vy = fb.vy;
+    // Clamp centroid fallback to realistic weather speed (<= 4 px/min on 64km radar, ~60 km/h).
+    const fbSpeed = Math.hypot(fb.vx, fb.vy);
+    if (fbSpeed > 4) {
+      vx = (fb.vx / fbSpeed) * 4;
+      vy = (fb.vy / fbSpeed) * 4;
+    } else {
+      vx = fb.vx;
+      vy = fb.vy;
+    }
   }
 
   const speed = Math.hypot(vx, vy);

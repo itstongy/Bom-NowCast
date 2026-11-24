@@ -1,10 +1,17 @@
 {
   "name": "bom-nowcast",
   "version": "1.0.0",
-  "description": "BOM radar CLI for Australia: fetch Bureau of Meteorology radar frames, render GIF loops, and run a lightweight nowcast.",
+  "description": "Fast Australian BOM radar CLI: loop viewer with 30-minute forecast frames, 60-minute rain nowcast, and Noctalia Shell widget.",
   "main": "bom-nowcast.js",
   "bin": {
     "bom-nowcast": "bom-nowcast.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/itstongy/Bom-NowCast.git"
   },
   "scripts": {
     "test": "node --test test/*.test.js"

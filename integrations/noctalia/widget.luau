@@ -7,9 +7,9 @@
 --   3) send a native Noctalia notification when rain approaches within 30 min
 
 local POLL_INTERVAL_MS = 300000
-local PREFETCH_CMD = "/home/tongy/.local/bin/bom-nowcast prefetch --noctalia"
-local REFRESH_CMD = "/home/tongy/.local/bin/bom-nowcast prefetch --noctalia --fresh"
-local OPEN_RADAR_CMD = "/home/tongy/.local/bin/hypr-open-or-focus org.tongy.bom-nowcast -- env GDK_WAYLAND_DISABLE=ext_background_effect_manager_v1 ghostty --class=org.tongy.bom-nowcast -e /home/tongy/.local/bin/bom-nowcast"
+local PREFETCH_CMD = "$HOME/.local/bin/bom-nowcast prefetch --noctalia"
+local REFRESH_CMD = "$HOME/.local/bin/bom-nowcast prefetch --noctalia --fresh"
+local OPEN_RADAR_CMD = "$HOME/.local/bin/hypr-open-or-focus org.tongy.bom-nowcast -- env GDK_WAYLAND_DISABLE=ext_background_effect_manager_v1 ghostty --class=org.tongy.bom-nowcast -e $HOME/.local/bin/bom-nowcast"
 
 local inFlight = false
 local initialized = false
@@ -25,6 +25,9 @@ local function applyPayload(raw)
 
   barWidget.setGlyph(data.glyph or "cloud")
   barWidget.setText(data.text or "")
+  if data.color and data.color ~= "" then
+    barWidget.setColor(tostring(data.color))
+  end
   barWidget.setTooltip(data.tooltip or "BOM Nowcast")
 
   if data.shouldNotify and data.notifyTitle then
