@@ -376,22 +376,36 @@ test('timeline60m, intensity trend, forecast advection, bitmap badges, and Nocta
   assert.equal(adv.data[(510 * w + 10) * 4 + 3], 255);
   assert.match(formatLocalTimeLabel(baseTs), /^\d{1,2}:\d{2} (AM|PM)$/);
 
-  // Noctalia payload & alert evaluation (rich bar text when rain approaches or falls)
+  // Noctalia payload & alert evaluation (compact bar text; sparkline stays in hover tooltip)
   const alert = evaluateRainAlert(result, { thresholdMin: 30, persistState: false });
   assert.equal(alert.shouldNotify, true);
   assert.match(alert.notifyTitle, /Rain in ~\d+ min/);
   const payload = buildNoctaliaPayload(result, alert);
   assert.equal(payload.glyph, 'cloud-storm');
-  assert.match(payload.text, /^\d+m heavy↑ .*[▁-█]/);
+  assert.match(payload.text, /^\d+m heavy↑$/);
   assert.match(payload.tooltip, /Next 60m:/);
   assert.match(payload.tooltip, /building/);
 
-  // Raining-now bar text includes clear time and sparkline
+  // Raining-now bar text stays compact with clear time
   const rainingPayload = buildNoctaliaPayload({
     ...result,
     locations: [{ ...loc, rainNow: true, etaMin: 0, clearEtaMin: 28, sparkline: '▆▆▆▃▃▁······' }],
   });
-  assert.equal(rainingPayload.text, 'Now heavy↑ (28m left) ▆▆▆▃▃▁······');
+  assert.equal(rainingPayload.text, 'Now heavy↑ · 28m');
+
+  // Far light rain (>45m) stays icon-only so the bar never bloats
+  const farLightPayload = buildNoctaliaPayload({
+    ...result,
+    locations: [{
+      ...loc,
+      rainNow: false,
+      etaMin: 89,
+      intensity: { likelyBand: 1, peakBand: 2, likelyLabel: 'light', peakLabel: 'light' },
+      intensityTrend: 'steady',
+    }],
+  });
+  assert.equal(farLightPayload.glyph, 'cloud-rain');
+  assert.equal(farLightPayload.text, '');
 
   // Dry skies stay quiet (icon-only, empty bar text)
   const dryPayload = buildNoctaliaPayload({

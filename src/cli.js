@@ -309,9 +309,7 @@ function buildNoctaliaPayload(nowcastResult, alertInfo = {}) {
   const intensityLabel = entry.intensity ? entry.intensity.likelyLabel : 'none';
   const peakLabel = entry.intensity ? entry.intensity.peakLabel : 'none';
   const isHeavy = peakLabel === 'heavy' || peakLabel === 'very heavy';
-  const tag = shortIntensityTag(isHeavy ? peakLabel : intensityLabel);
   const arrow = trendArrow(entry.intensityTrend);
-  const hasSpark = Boolean(entry.sparkline && entry.sparkline.replace(/·/g, '').length > 0);
 
   let glyph = 'sun';
   let text = '';
@@ -320,19 +318,21 @@ function buildNoctaliaPayload(nowcastResult, alertInfo = {}) {
   if (entry.rainNow) {
     glyph = isHeavy ? 'cloud-storm' : 'cloud-rain';
     color = isHeavy ? 'error' : 'primary';
-    const parts = ['Now'];
-    if (tag) parts.push(`${tag}${arrow}`);
-    if (entry.clearEtaMin) parts.push(`(${entry.clearEtaMin}m left)`);
-    if (hasSpark) parts.push(entry.sparkline);
-    text = parts.join(' ');
+    const heavyTag = isHeavy ? ` ${shortIntensityTag(peakLabel)}${arrow}` : arrow;
+    text = entry.clearEtaMin
+      ? `Now${heavyTag} · ${entry.clearEtaMin}m`
+      : `Now${heavyTag}`;
   } else if (entry.etaMin !== null) {
     const mins = Math.max(1, Math.round(entry.etaMin));
     glyph = isHeavy ? 'cloud-storm' : 'cloud-rain';
-    color = mins <= 30 ? (isHeavy ? 'error' : 'primary') : 'secondary';
-    const parts = [`${mins}m`];
-    if (tag) parts.push(`${tag}${arrow}`);
-    if (hasSpark) parts.push(entry.sparkline);
-    text = parts.join(' ');
+    if (mins <= 45 || (isHeavy && mins <= 60)) {
+      color = mins <= 30 ? (isHeavy ? 'error' : 'primary') : 'secondary';
+      text = isHeavy ? `${mins}m ${shortIntensityTag(peakLabel)}${arrow}` : `${mins}m${arrow}`;
+    } else {
+      // Far-out light/moderate rain: keep the bar compact (icon only; full ETA on hover).
+      color = 'secondary';
+      text = '';
+    }
   } else if (entry.nearestRain && entry.nearestRain.km <= 40) {
     glyph = 'cloud';
     text = '';
