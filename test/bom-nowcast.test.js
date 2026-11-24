@@ -383,6 +383,9 @@ test('timeline60m, intensity trend, forecast advection, bitmap badges, and Nocta
   const payload = buildNoctaliaPayload(result, alert);
   assert.equal(payload.glyph, 'cloud-storm');
   assert.match(payload.text, /^\d+m heavy↑$/);
+  assert.match(payload.title, /^\d+m$/);
+  assert.equal(payload.subtitle, 'heavy↑');
+  assert.equal(payload.timeline60m.length, 12);
   assert.match(payload.tooltip, /Next 60m:/);
   assert.match(payload.tooltip, /building/);
 
@@ -392,6 +395,8 @@ test('timeline60m, intensity trend, forecast advection, bitmap badges, and Nocta
     locations: [{ ...loc, rainNow: true, etaMin: 0, clearEtaMin: 28, sparkline: '▆▆▆▃▃▁······' }],
   });
   assert.equal(rainingPayload.text, 'Now heavy↑ · 28m');
+  assert.equal(rainingPayload.title, 'Now · 28m');
+  assert.equal(rainingPayload.subtitle, 'heavy↑');
 
   // Far light rain (>45m) stays icon-only so the bar never bloats
   const farLightPayload = buildNoctaliaPayload({

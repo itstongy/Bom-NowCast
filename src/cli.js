@@ -313,6 +313,8 @@ function buildNoctaliaPayload(nowcastResult, alertInfo = {}) {
 
   let glyph = 'sun';
   let text = '';
+  let title = '';
+  let subtitle = '';
   let color = 'tertiary';
 
   if (entry.rainNow) {
@@ -322,14 +324,17 @@ function buildNoctaliaPayload(nowcastResult, alertInfo = {}) {
     text = entry.clearEtaMin
       ? `Now${heavyTag} · ${entry.clearEtaMin}m`
       : `Now${heavyTag}`;
+    title = entry.clearEtaMin ? `Now · ${entry.clearEtaMin}m` : 'Now';
+    subtitle = `${shortIntensityTag(isHeavy ? peakLabel : intensityLabel)}${arrow}`;
   } else if (entry.etaMin !== null) {
     const mins = Math.max(1, Math.round(entry.etaMin));
     glyph = isHeavy ? 'cloud-storm' : 'cloud-rain';
+    title = `${mins}m`;
+    subtitle = `${shortIntensityTag(isHeavy ? peakLabel : intensityLabel)}${arrow}`;
     if (mins <= 45 || (isHeavy && mins <= 60)) {
       color = mins <= 30 ? (isHeavy ? 'error' : 'primary') : 'secondary';
       text = isHeavy ? `${mins}m ${shortIntensityTag(peakLabel)}${arrow}` : `${mins}m${arrow}`;
     } else {
-      // Far-out light/moderate rain: keep the bar compact (icon only; full ETA on hover).
       color = 'secondary';
       text = '';
     }
@@ -365,6 +370,8 @@ function buildNoctaliaPayload(nowcastResult, alertInfo = {}) {
   return {
     glyph,
     text,
+    title,
+    subtitle,
     color,
     tooltip: lines.join('\n'),
     rainNow: entry.rainNow,
@@ -372,6 +379,7 @@ function buildNoctaliaPayload(nowcastResult, alertInfo = {}) {
     clearEtaMin: entry.clearEtaMin,
     intensity: intensityLabel,
     intensityTrend: entry.intensityTrend,
+    timeline60m: entry.timeline60m || [],
     sparkline: entry.sparkline,
     dataAgeMin: nowcastResult.dataAgeMin,
     shouldNotify: Boolean(alertInfo.shouldNotify),
