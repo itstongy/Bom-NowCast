@@ -2,12 +2,12 @@
   "name": "bom-nowcast",
   "version": "1.0.0",
   "description": "BOM radar CLI for Australia: fetch Bureau of Meteorology radar frames, render GIF loops, and run a lightweight nowcast.",
-  "main": "index.js",
+  "main": "bom-nowcast.js",
   "bin": {
     "bom-nowcast": "bom-nowcast.js"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test test/*.test.js"
   },
   "keywords": [
     "bom",
