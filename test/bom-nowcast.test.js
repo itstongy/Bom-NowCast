@@ -376,13 +376,28 @@ test('timeline60m, intensity trend, forecast advection, bitmap badges, and Nocta
   assert.equal(adv.data[(510 * w + 10) * 4 + 3], 255);
   assert.match(formatLocalTimeLabel(baseTs), /^\d{1,2}:\d{2} (AM|PM)$/);
 
-  // Noctalia payload & alert evaluation
+  // Noctalia payload & alert evaluation (rich bar text when rain approaches or falls)
   const alert = evaluateRainAlert(result, { thresholdMin: 30, persistState: false });
   assert.equal(alert.shouldNotify, true);
   assert.match(alert.notifyTitle, /Rain in ~\d+ min/);
   const payload = buildNoctaliaPayload(result, alert);
   assert.equal(payload.glyph, 'cloud-storm');
-  assert.match(payload.text, /^\d+m$/);
+  assert.match(payload.text, /^\d+m heavy↑ .*[▁-█]/);
   assert.match(payload.tooltip, /Next 60m:/);
   assert.match(payload.tooltip, /building/);
+
+  // Raining-now bar text includes clear time and sparkline
+  const rainingPayload = buildNoctaliaPayload({
+    ...result,
+    locations: [{ ...loc, rainNow: true, etaMin: 0, clearEtaMin: 28, sparkline: '▆▆▆▃▃▁······' }],
+  });
+  assert.equal(rainingPayload.text, 'Now heavy↑ (28m left) ▆▆▆▃▃▁······');
+
+  // Dry skies stay quiet (icon-only, empty bar text)
+  const dryPayload = buildNoctaliaPayload({
+    ...result,
+    locations: [{ ...loc, rainNow: false, etaMin: null, nearestRain: { km: 25, dir: 'W' }, sparkline: '············' }],
+  });
+  assert.equal(dryPayload.glyph, 'cloud');
+  assert.equal(dryPayload.text, '');
 });

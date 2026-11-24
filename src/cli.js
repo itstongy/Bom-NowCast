@@ -274,6 +274,20 @@ function sendDesktopNotification(title, body) {
   }
 }
 
+function shortIntensityTag(label) {
+  if (label === 'very heavy') return 'severe';
+  if (label === 'heavy') return 'heavy';
+  if (label === 'moderate') return 'mod';
+  if (label === 'light') return 'light';
+  return '';
+}
+
+function trendArrow(trend) {
+  if (trend === 'building') return '↑';
+  if (trend === 'easing') return '↓';
+  return '';
+}
+
 function buildNoctaliaPayload(nowcastResult, alertInfo = {}) {
   const entry = nowcastResult.locations && nowcastResult.locations[0];
   const ageText = nowcastResult.dataAgeMin !== null && nowcastResult.dataAgeMin !== undefined
@@ -295,6 +309,9 @@ function buildNoctaliaPayload(nowcastResult, alertInfo = {}) {
   const intensityLabel = entry.intensity ? entry.intensity.likelyLabel : 'none';
   const peakLabel = entry.intensity ? entry.intensity.peakLabel : 'none';
   const isHeavy = peakLabel === 'heavy' || peakLabel === 'very heavy';
+  const tag = shortIntensityTag(isHeavy ? peakLabel : intensityLabel);
+  const arrow = trendArrow(entry.intensityTrend);
+  const hasSpark = Boolean(entry.sparkline && entry.sparkline.replace(/·/g, '').length > 0);
 
   let glyph = 'sun';
   let text = '';
@@ -302,13 +319,20 @@ function buildNoctaliaPayload(nowcastResult, alertInfo = {}) {
 
   if (entry.rainNow) {
     glyph = isHeavy ? 'cloud-storm' : 'cloud-rain';
-    text = entry.clearEtaMin ? `Now` : 'Now';
     color = isHeavy ? 'error' : 'primary';
+    const parts = ['Now'];
+    if (tag) parts.push(`${tag}${arrow}`);
+    if (entry.clearEtaMin) parts.push(`(${entry.clearEtaMin}m left)`);
+    if (hasSpark) parts.push(entry.sparkline);
+    text = parts.join(' ');
   } else if (entry.etaMin !== null) {
     const mins = Math.max(1, Math.round(entry.etaMin));
     glyph = isHeavy ? 'cloud-storm' : 'cloud-rain';
-    text = `${mins}m`;
     color = mins <= 30 ? (isHeavy ? 'error' : 'primary') : 'secondary';
+    const parts = [`${mins}m`];
+    if (tag) parts.push(`${tag}${arrow}`);
+    if (hasSpark) parts.push(entry.sparkline);
+    text = parts.join(' ');
   } else if (entry.nearestRain && entry.nearestRain.km <= 40) {
     glyph = 'cloud';
     text = '';
