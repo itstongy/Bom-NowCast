@@ -20,12 +20,16 @@ const {
 const { ensureFrames, ensureOverlay, ensureEmojiPng } = require('./bom');
 const { readPngFile, writePngFast } = require('./fast-png');
 const { encodeGif, patchGifDelays } = require('./gif-encoder');
+const { drawBadge, drawProgressBar } = require('./bitmap-font');
 
 const execFileAsync = promisify(execFile);
 
-const RENDER_VERSION = 'v2';
-const DEFAULT_FRAME_DELAY_CS = 55; // 0.55s per historical frame
-const DEFAULT_HOLD_DELAY_CS = 140; // 1.40s pause on the latest frame
+const RENDER_VERSION = 'v3';
+const DEFAULT_FRAME_DELAY_CS = 55;
+const DEFAULT_HOLD_DELAY_CS = 140;
+const FORECAST_LEADS_MIN = [10, 20, 30];
+const BOM_HEADER_PX = 16;
+const BOM_FOOTER_PX = 16;
 
 // Fast RGBA alpha compositing: fast-paths transparent (0) and opaque (255) pixels.
 function alphaOver(dst, src) {
@@ -49,7 +53,7 @@ function alphaOver(dst, src) {
 
     const da = dd[i + 3];
     const invSa = 255 - sa;
-    const outA = sa + ((da * invSa + 127) / 255) | 0;
+    const outA = sa + (((da * invSa + 127) / 255) | 0);
     if (outA === 0) continue;
 
     const daTerm = (da * invSa) / 255;
@@ -89,7 +93,7 @@ function alphaOverAt(dst, src, x0, y0) {
 
       const da = dd[di + 3];
       const invSa = 255 - sa;
-      const outA = sa + ((da * invSa + 127) / 255) | 0;
+      const outA = sa + (((da * invSa + 127) / 255) | 0);
       if (outA === 0) continue;
 
       const daTerm = (da * invSa) / 255;
@@ -127,10 +131,6 @@ function scalePng(src, size, cacheKey) {
 
 const staticLayersCache = new Map();
 
-/**
- * Prefetch and pre-bake the static background and top overlay (place names + scaled emojis)
- * once per (radarId, locations) combination so per-frame compositing only blends 2 layers.
- */
 async function prepareStaticLayers(radarId, locations = {}) {
   const locHash = hashLocations(locations);
   const key = `${radarId}:${locHash}`;
@@ -141,15 +141,12 @@ async function prepareStaticLayers(radarId, locations = {}) {
     ([, v]) => v && typeof v.lat === 'number' && typeof v.lon === 'number'
   );
 
-  // Fetch overlays and all unique location emojis in parallel.
   const uniqueEmojis = [...new Set(entries.map(([name, loc]) => resolveLocationEmoji(name, loc)))];
   const [bg, locOverlay, emojiPngs] = await Promise.all([
     ensureOverlay(radarId, 'background'),
     ensureOverlay(radarId, 'locations'),
     Promise.all(
-      uniqueEmojis.map((em) =>
-        ensureEmojiPng(em).catch(() => null)
-      )
+      uniqueEmojis.map((em) => ensureEmojiPng(em).catch(() => null))
     ),
   ]);
 
@@ -158,7 +155,6 @@ async function prepareStaticLayers(radarId, locations = {}) {
     if (emojiPngs[i]) emojiByChar.set(uniqueEmojis[i], emojiPngs[i]);
   }
 
-  // Bake locations overlay + emoji pins into a single reusable top layer.
   const top = {
     width: locOverlay.width,
     height: locOverlay.height,
@@ -189,7 +185,6 @@ function compositeRadarFrame(radarImg, bg, top) {
   const h = radarImg.height;
   let data;
   if (bg.width === w && bg.height === h) {
-    // Fast copy of opaque background instead of alpha-blending onto transparent zeros.
     data = Buffer.from(bg.data);
   } else {
     data = Buffer.alloc(w * h * 4);
@@ -202,11 +197,83 @@ function compositeRadarFrame(radarImg, bg, top) {
   return out;
 }
 
-function buildDelaysCs(count, delayMs, holdMs) {
+/**
+ * Create a projected radar layer by shifting precipitation pixels along (vx, vy) * leadMin.
+ * Excludes BOM's static header/footer bars and dims alpha slightly to signal a forecast.
+ */
+function advectRadarFrame(lastRadarImg, vx, vy, leadMin) {
+  const w = lastRadarImg.width;
+  const h = lastRadarImg.height;
+  const src = lastRadarImg.data;
+  const dst = Buffer.alloc(w * h * 4);
+
+  const dx = Math.round(vx * leadMin);
+  const dy = Math.round(vy * leadMin);
+  const yStart = h > BOM_HEADER_PX + BOM_FOOTER_PX ? BOM_HEADER_PX : 0;
+  const yEnd = h > BOM_HEADER_PX + BOM_FOOTER_PX ? h - BOM_FOOTER_PX : h;
+
+  // Keep BOM top copyright header bar only; omit stale UTC footer on forecast frames.
+  if (yStart > 0) {
+    src.copy(dst, 0, 0, yStart * w * 4);
+  }
+
+  for (let y = yStart; y < yEnd; y++) {
+    const ny = y + dy;
+    if (ny < yStart || ny >= yEnd) continue;
+    for (let x = 0; x < w; x++) {
+      const nx = x + dx;
+      if (nx < 0 || nx >= w) continue;
+      const si = (y * w + x) << 2;
+      if (src[si + 3] === 0) continue;
+      const r = src[si];
+      const g = src[si + 1];
+      const b = src[si + 2];
+      // Skip greyscale borders/range rings from raw radar frame.
+      if (r === g && g === b) continue;
+
+      const di = (ny * w + nx) << 2;
+      dst[di] = r;
+      dst[di + 1] = g;
+      dst[di + 2] = b;
+      dst[di + 3] = 195; // ~76% opacity distinguishes projected forecast from live echoes
+    }
+  }
+
+  return { width: w, height: h, data: dst };
+}
+
+function formatLocalTimeLabel(tsMs) {
+  if (!tsMs) return '';
+  const d = new Date(tsMs);
+  let h = d.getHours();
+  const m = String(d.getMinutes()).padStart(2, '0');
+  const suffix = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  return `${h}:${m} ${suffix}`;
+}
+
+function shouldIncludeForecast(opts) {
+  if (opts.forecast === false) return false;
+  const m = opts.forecastMotion;
+  if (!m || !m.motionReliable) return false;
+  if ((m.rainPixels || 0) < 100) return false;
+  const speed = Math.hypot(m.vx || 0, m.vy || 0);
+  return speed >= 0.15;
+}
+
+function buildDelaysCs(historyCount, forecastCount, delayMs, holdMs) {
   const frameCs = Math.max(10, Math.round((delayMs ?? DEFAULT_FRAME_DELAY_CS * 10) / 10));
   const holdCs = Math.max(frameCs, Math.round((holdMs ?? DEFAULT_HOLD_DELAY_CS * 10) / 10));
-  const delays = new Array(count).fill(frameCs);
-  if (count > 0) delays[count - 1] = holdCs;
+  const delays = new Array(historyCount).fill(frameCs);
+  if (forecastCount > 0) {
+    // Pause briefly on NOW before flowing into projected forecast frames, then hold on final frame.
+    if (historyCount > 0) delays[historyCount - 1] = Math.max(frameCs, Math.round(holdCs * 0.78));
+    for (let i = 0; i < forecastCount; i++) {
+      delays.push(i === forecastCount - 1 ? holdCs : Math.max(frameCs, Math.round(frameCs * 1.18)));
+    }
+  } else if (historyCount > 0) {
+    delays[historyCount - 1] = holdCs;
+  }
   return delays;
 }
 
@@ -218,7 +285,6 @@ async function encodeGifWithFfmpeg(pngPaths, delaysCs, outGif) {
   const listPath = path.join(tmpDir, 'frames.txt');
   const tmpGif = `${outGif}.${process.pid}.tmp.gif`;
   try {
-    // Emit exactly N frames (1 per PNG) and patch exact per-frame GCE delays afterward.
     const lines = [];
     for (let i = 0; i < pngPaths.length; i++) {
       const escaped = pngPaths[i].replace(/'/g, "'\\''");
@@ -251,27 +317,6 @@ async function encodeGifWithFfmpeg(pngPaths, delaysCs, outGif) {
   }
 }
 
-function getLoopCachePath(radarId, frameEntries, locations = {}, opts = {}) {
-  const locHash = hashLocations(locations);
-  const delaysCs = buildDelaysCs(frameEntries.length, opts.delayMs, opts.holdMs);
-  const framesSig = crypto
-    .createHash('sha1')
-    .update(`${RENDER_VERSION}|${radarId}|${locHash}|${delaysCs.join(',')}|${frameEntries.map((f) => f.file).join(',')}`)
-    .digest('hex')
-    .slice(0, 16);
-  return {
-    locHash,
-    delaysCs,
-    cachedGifPath: path.join(loopCacheDir(), `${radarId}-${framesSig}.gif`),
-  };
-}
-
-function hasCachedLoopGif(radarId, frameEntries, locations = {}, opts = {}) {
-  if (opts.fresh || !frameEntries || frameEntries.length === 0) return false;
-  const { cachedGifPath } = getLoopCachePath(radarId, frameEntries, locations, opts);
-  return fs.existsSync(cachedGifPath);
-}
-
 async function encodeGifWithMagick(pngPaths, delaysCs, outGif) {
   const bin = findExecutable('magick') || findExecutable('convert');
   if (!bin) return false;
@@ -296,71 +341,163 @@ async function encodeGifWithMagick(pngPaths, delaysCs, outGif) {
   }
 }
 
+function getLoopCachePath(radarId, frameEntries, locations = {}, opts = {}) {
+  const locHash = hashLocations(locations);
+  const useForecast = shouldIncludeForecast(opts);
+  const forecastCount = useForecast ? FORECAST_LEADS_MIN.length : 0;
+  const delaysCs = buildDelaysCs(frameEntries.length, forecastCount, opts.delayMs, opts.holdMs);
+  const motionKey = useForecast
+    ? `fcst:${opts.forecastMotion.vx.toFixed(2)},${opts.forecastMotion.vy.toFixed(2)}`
+    : 'nofcst';
+  const tzOffset = new Date().getTimezoneOffset();
+  const framesSig = crypto
+    .createHash('sha1')
+    .update(
+      `${RENDER_VERSION}|${radarId}|${locHash}|${tzOffset}|${motionKey}|${delaysCs.join(',')}|${frameEntries.map((f) => f.file).join(',')}`
+    )
+    .digest('hex')
+    .slice(0, 16);
+  return {
+    locHash,
+    delaysCs,
+    useForecast,
+    forecastCount,
+    cachedGifPath: path.join(loopCacheDir(), `${radarId}-${framesSig}.gif`),
+  };
+}
+
+function hasCachedLoopGif(radarId, frameEntries, locations = {}, opts = {}) {
+  if (opts.fresh || !frameEntries || frameEntries.length === 0) return false;
+  const { cachedGifPath } = getLoopCachePath(radarId, frameEntries, locations, opts);
+  return fs.existsSync(cachedGifPath);
+}
+
 async function renderLoopGifFromFrames(radarId, frameEntries, outGif, locations = {}, opts = {}) {
   if (!frameEntries || frameEntries.length === 0) {
     throw new Error('no radar frames available to render loop');
   }
 
-  const { locHash, delaysCs, cachedGifPath } = getLoopCachePath(radarId, frameEntries, locations, opts);
+  const { locHash, delaysCs, useForecast, forecastCount, cachedGifPath } = getLoopCachePath(
+    radarId,
+    frameEntries,
+    locations,
+    opts
+  );
+
   if (!opts.fresh && fs.existsSync(cachedGifPath)) {
     fs.mkdirSync(path.dirname(outGif), { recursive: true });
     if (path.resolve(cachedGifPath) !== path.resolve(outGif)) {
       fs.copyFileSync(cachedGifPath, outGif);
     }
-    return { outGif, cacheHit: true };
+    return { outGif, cacheHit: true, forecastFrames: forecastCount };
   }
 
   const frameCacheDir = path.join(renderCacheDir(), `${RENDER_VERSION}-${radarId}-${locHash}`);
   fs.mkdirSync(frameCacheDir, { recursive: true });
 
   const decodedImgs = opts.decodedImgs || null;
-  const renderedPaths = new Array(frameEntries.length);
-  const missingIndices = [];
+  const basePaths = new Array(frameEntries.length);
+  const missingBase = [];
 
   for (let i = 0; i < frameEntries.length; i++) {
     const outPng = path.join(frameCacheDir, frameEntries[i].file);
-    renderedPaths[i] = outPng;
+    basePaths[i] = outPng;
     if (opts.fresh || !fs.existsSync(outPng)) {
-      missingIndices.push(i);
+      missingBase.push(i);
     }
   }
 
-  // Only prepare static layers & composite frames that are not already cached on disk.
-  const compositedByIndex = new Map();
-  if (missingIndices.length > 0) {
-    const layers = opts.staticLayers || (await prepareStaticLayers(radarId, locations));
-    for (const i of missingIndices) {
-      const radarImg = decodedImgs && decodedImgs[i]
-        ? decodedImgs[i]
-        : readPngFile(frameEntries[i].path);
-      const composite = compositeRadarFrame(radarImg, layers.bg, layers.top);
-      compositedByIndex.set(i, composite);
-      writeFileAtomic(renderedPaths[i], writePngFast(composite, 1));
-    }
+  const needsLayers = missingBase.length > 0 || useForecast;
+  const layers = needsLayers ? (opts.staticLayers || (await prepareStaticLayers(radarId, locations))) : null;
+
+  // Build base composites (background + radar + labels + emojis) for uncached frames.
+  const baseImgs = new Array(frameEntries.length);
+  for (const i of missingBase) {
+    const radarImg = decodedImgs && decodedImgs[i]
+      ? decodedImgs[i]
+      : readPngFile(frameEntries[i].path);
+    const composite = compositeRadarFrame(radarImg, layers.bg, layers.top);
+    baseImgs[i] = composite;
+    writeFileAtomic(basePaths[i], writePngFast(composite, 1));
   }
 
-  fs.mkdirSync(loopCacheDir(), { recursive: true });
+  // Stamp local-time badges + 3px timeline progress bar + optional projected forecast frames.
+  const totalCount = frameEntries.length + forecastCount;
+  const tmpStageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bom-stage-'));
+  const stagedPaths = [];
+  const stagedImgs = [];
 
-  // Encode GIF via fastest available backend: ffmpeg -> magick/convert -> pure JS fallback.
-  let encoded = false;
   try {
-    encoded = await encodeGifWithFfmpeg(renderedPaths, delaysCs, cachedGifPath);
-  } catch {
-    encoded = false;
-  }
+    for (let i = 0; i < frameEntries.length; i++) {
+      const base = baseImgs[i] || readPngFile(basePaths[i]);
+      const img = { width: base.width, height: base.height, data: Buffer.from(base.data) };
+      const isNow = i === frameEntries.length - 1;
+      const localLabel = formatLocalTimeLabel(frameEntries[i].tsMs);
+      if (localLabel) {
+        drawBadge(img, isNow ? `${localLabel} NOW` : localLabel, {
+          dotColor: isNow ? [74, 222, 128] : [56, 189, 248],
+          borderColor: isNow ? [74, 222, 128, 170] : [211, 198, 170, 110],
+        });
+      }
+      drawProgressBar(img, i, frameEntries.length, totalCount);
 
-  if (!encoded) {
+      const staged = path.join(tmpStageDir, `f-${String(i).padStart(2, '0')}.png`);
+      fs.writeFileSync(staged, writePngFast(img, 1));
+      stagedPaths.push(staged);
+      stagedImgs.push(img);
+    }
+
+    if (useForecast) {
+      const lastIdx = frameEntries.length - 1;
+      const lastRadarImg = decodedImgs && decodedImgs[lastIdx]
+        ? decodedImgs[lastIdx]
+        : readPngFile(frameEntries[lastIdx].path);
+      const lastTsMs = frameEntries[lastIdx].tsMs;
+      const { vx, vy } = opts.forecastMotion;
+
+      for (let f = 0; f < FORECAST_LEADS_MIN.length; f++) {
+        const leadMin = FORECAST_LEADS_MIN[f];
+        const advected = advectRadarFrame(lastRadarImg, vx, vy, leadMin);
+        const img = compositeRadarFrame(advected, layers.bg, layers.top);
+        const futureTime = lastTsMs ? formatLocalTimeLabel(lastTsMs + leadMin * 60000) : '';
+        const label = futureTime ? `FCST +${leadMin}M ${futureTime}` : `FORECAST +${leadMin}M`;
+        drawBadge(img, label, {
+          dotColor: [245, 158, 11],
+          borderColor: [245, 158, 11, 185],
+          textColor: [254, 243, 199],
+        });
+        drawProgressBar(img, frameEntries.length + f, frameEntries.length, totalCount);
+
+        const staged = path.join(tmpStageDir, `f-${String(frameEntries.length + f).padStart(2, '0')}.png`);
+        fs.writeFileSync(staged, writePngFast(img, 1));
+        stagedPaths.push(staged);
+        stagedImgs.push(img);
+      }
+    }
+
+    fs.mkdirSync(loopCacheDir(), { recursive: true });
+
+    let encoded = false;
     try {
-      encoded = await encodeGifWithMagick(renderedPaths, delaysCs, cachedGifPath);
+      encoded = await encodeGifWithFfmpeg(stagedPaths, delaysCs, cachedGifPath);
     } catch {
       encoded = false;
     }
-  }
 
-  if (!encoded) {
-    const frames = renderedPaths.map((p, i) => compositedByIndex.get(i) || readPngFile(p));
-    const gifBuf = encodeGif(frames, delaysCs);
-    writeFileAtomic(cachedGifPath, gifBuf);
+    if (!encoded) {
+      try {
+        encoded = await encodeGifWithMagick(stagedPaths, delaysCs, cachedGifPath);
+      } catch {
+        encoded = false;
+      }
+    }
+
+    if (!encoded) {
+      const gifBuf = encodeGif(stagedImgs, delaysCs);
+      writeFileAtomic(cachedGifPath, gifBuf);
+    }
+  } finally {
+    fs.rmSync(tmpStageDir, { recursive: true, force: true });
   }
 
   fs.mkdirSync(path.dirname(outGif), { recursive: true });
@@ -368,7 +505,7 @@ async function renderLoopGifFromFrames(radarId, frameEntries, outGif, locations 
     fs.copyFileSync(cachedGifPath, outGif);
   }
 
-  return { outGif, cacheHit: false, compositedCount: missingIndices.length };
+  return { outGif, cacheHit: false, compositedCount: missingBase.length, forecastFrames: forecastCount };
 }
 
 async function renderLoopGif(radarId, frameCount, outGif, locations = {}, opts = {}) {
@@ -382,11 +519,14 @@ async function renderLoopGif(radarId, frameCount, outGif, locations = {}, opts =
 }
 
 module.exports = {
+  FORECAST_LEADS_MIN,
   alphaOver,
   alphaOverAt,
   scalePng,
   prepareStaticLayers,
   compositeRadarFrame,
+  advectRadarFrame,
+  formatLocalTimeLabel,
   hasCachedLoopGif,
   renderLoopGifFromFrames,
   renderLoopGif,

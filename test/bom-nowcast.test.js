@@ -19,9 +19,13 @@ const {
   computeFrameDeltaMin,
   estimateClearEtaMin,
   findNearestRain,
+  buildTimeline60m,
+  timelineToSparkline,
   nowcastFromFrames,
 } = require('../src/nowcast');
-const { alphaOver, alphaOverAt, scalePng } = require('../src/render');
+const { alphaOver, alphaOverAt, scalePng, advectRadarFrame, formatLocalTimeLabel } = require('../src/render');
+const { drawBadge, drawProgressBar } = require('../src/bitmap-font');
+const { buildNoctaliaPayload, evaluateRainAlert } = require('../src/cli');
 const { encodeGif, patchGifDelays } = require('../src/gif-encoder');
 
 function makeRadarPng(width, height, drawFn) {
@@ -311,4 +315,74 @@ test('CLI: config-init, location-add, locations, location-remove, radars', () =>
   } finally {
     fs.rmSync(tmpHome, { recursive: true, force: true });
   }
+});
+
+test('timeline60m, intensity trend, forecast advection, bitmap badges, and Noctalia payload', () => {
+  const w = 512;
+  const radar = RADARS.IDR664;
+  const target = { lat: radar.radarLat, lon: radar.radarLon };
+
+  // Approaching storm intensifying from band 1 (light) -> band 5 (moderate) -> band 9 (heavy)
+  const centersX = [176, 188, 200, 212];
+  const colors = [
+    [180, 180, 255], // band 1
+    [20, 20, 255],   // band 3
+    [0, 150, 144],   // band 5
+    [255, 100, 0],   // band 10 (heavy)
+  ];
+  const baseTs = Date.UTC(2026, 10, 24, 2, 0);
+  const frameEntries = centersX.map((_, i) => ({
+    file: `IDR664.T.trend${i}.png`,
+    ts: `2026112402${String(i * 6).padStart(2, '0')}`,
+    tsMs: baseTs + i * 6 * 60 * 1000,
+    path: `/unused/${i}`,
+  }));
+
+  const decodedImgs = centersX.map((cx, idx) => {
+    const [r, g, b] = colors[idx];
+    return makeRadarPng(w, w, (set) => {
+      for (let y = 236; y <= 276; y++) {
+        for (let x = cx - 20; x <= cx + 20; x++) {
+          set(x, y, r, g, b, 255);
+        }
+      }
+    });
+  });
+
+  const result = nowcastFromFrames('IDR664', { Home: target }, frameEntries, {
+    mode: 'local',
+    decodedImgs,
+  });
+  const loc = result.locations[0];
+  assert.equal(loc.intensityTrend, 'building');
+  assert.equal(loc.timeline60m.length, 12);
+  assert.equal(loc.sparkline.length, 12);
+  // Rain is 44px west at 2px/min -> buckets 3..6 (15..35m) should be active
+  assert.ok(loc.timeline60m.slice(2, 7).some((b) => b >= 8), `timeline: ${loc.timeline60m}`);
+  assert.equal(timelineToSparkline([-1, 0, 14]), '·▁█');
+  assert.equal(buildTimeline60m(new Int8Array(w * w).fill(-1), w, 256, 256, 2, 0, false, true).every((b) => b === -1), true);
+
+  // Advect latest frame by +10 min (+20 px East)
+  const adv = advectRadarFrame(decodedImgs[3], 2, 0, 10);
+  // Original center was x=212, advected center should be x=232 with forecast alpha 195
+  const off = (256 * w + 232) * 4;
+  assert.equal(adv.data[off], 255);
+  assert.equal(adv.data[off + 1], 100);
+  assert.equal(adv.data[off + 3], 195);
+
+  // Badge and progress bar rendering
+  drawBadge(adv, 'FCST +10M 1:04 PM', { dotColor: [245, 158, 11] });
+  drawProgressBar(adv, 7, 7, 10);
+  assert.equal(adv.data[(510 * w + 10) * 4 + 3], 255);
+  assert.match(formatLocalTimeLabel(baseTs), /^\d{1,2}:\d{2} (AM|PM)$/);
+
+  // Noctalia payload & alert evaluation
+  const alert = evaluateRainAlert(result, { thresholdMin: 30, persistState: false });
+  assert.equal(alert.shouldNotify, true);
+  assert.match(alert.notifyTitle, /Rain in ~\d+ min/);
+  const payload = buildNoctaliaPayload(result, alert);
+  assert.equal(payload.glyph, 'cloud-storm');
+  assert.match(payload.text, /^\d+m$/);
+  assert.match(payload.tooltip, /Next 60m:/);
+  assert.match(payload.tooltip, /building/);
 });

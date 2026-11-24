@@ -9,6 +9,9 @@ const ETA_CROSS_PX = 20;
 const INTENSITY_RADIUS_PX = 6;
 const BOM_HEADER_PX = 16;
 const BOM_FOOTER_PX = 16;
+const TIMELINE_BUCKETS = 12; // 12 x 5 min = 60 min
+const TIMELINE_STEP_MIN = 5;
+const SPARK_CHARS = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 // Exact BOM reflectivity palette ordered low -> high intensity (white = light rain, dark red/black = hail).
 const INTENSITY_ORDER_HEX = [
@@ -613,6 +616,110 @@ function findNearestRain(mask, w, tx, ty, kmPerPx) {
 }
 
 /**
+ * Project upstream rain along (-vx, -vy) into 12 x 5-minute buckets (0..60 min).
+ * Each bucket holds the p80 reflectivity band (-1 = dry, 0..14 = BOM band).
+ */
+function buildTimeline60m(bandMap, w, tx, ty, vx, vy, rainNow, motionReliable) {
+  const buckets = new Array(TIMELINE_BUCKETS).fill(-1);
+  const speed = Math.hypot(vx, vy);
+  const canProject = motionReliable && speed >= 0.1;
+
+  for (let b = 0; b < TIMELINE_BUCKETS; b++) {
+    const samples = [];
+    if (b === 0 && rainNow) {
+      const local = sampleBandsRadius(bandMap, w, tx, ty, INTENSITY_RADIUS_PX);
+      for (const s of local) samples.push(s);
+    }
+
+    if (canProject) {
+      const tStart = b * TIMELINE_STEP_MIN;
+      // Sample 3 sub-steps inside each 5-minute bucket to avoid skipping narrow rain bands.
+      const subSteps = [tStart + 0.5, tStart + 2.5, tStart + 4.5];
+      for (const t of subSteps) {
+        const ux = Math.round(tx - vx * t);
+        const uy = Math.round(ty - vy * t);
+        if (ux < 0 || uy < 0 || ux >= w || uy >= w) continue;
+        const local = sampleBandsRadius(bandMap, w, ux, uy, 5);
+        for (const s of local) samples.push(s);
+      }
+    }
+
+    if (samples.length > 0) {
+      samples.sort((a, b2) => a - b2);
+      buckets[b] = Math.round(percentile(samples, 0.75));
+    }
+  }
+
+  return buckets;
+}
+
+function bandToSparkChar(band, bandCount = PALETTE_RGB.length) {
+  if (band === null || band === undefined || band < 0) return '·';
+  const idx = clamp(Math.floor((band / Math.max(1, bandCount - 1)) * (SPARK_CHARS.length - 1)), 0, SPARK_CHARS.length - 1);
+  return SPARK_CHARS[idx];
+}
+
+function timelineToSparkline(timeline60m) {
+  return timeline60m.map((b) => bandToSparkChar(b)).join('');
+}
+
+/**
+ * Compare intensity of the relevant rain cell between an earlier frame and the latest frame
+ * to detect whether approaching/overhead rain is building, steady, or easing.
+ */
+function estimateIntensityTrend(prevImg, lastBandMap, w, tx, ty, vx, vy, dtMin, rainNow, etaMin) {
+  if (!prevImg || !lastBandMap || !Number.isFinite(dtMin) || dtMin <= 0) return null;
+  const focusT = rainNow ? 0 : (etaMin !== null ? etaMin : null);
+  if (focusT === null) return null;
+
+  const nowX = Math.round(tx - vx * focusT);
+  const nowY = Math.round(ty - vy * focusT);
+  const prevX = Math.round(nowX - vx * dtMin);
+  const prevY = Math.round(nowY - vy * dtMin);
+
+  if (nowX < 0 || nowY < 0 || nowX >= w || nowY >= w) return null;
+  if (prevX < 0 || prevY < 0 || prevX >= w || prevY >= w) return null;
+
+  const r = 18;
+  const nowBands = sampleBandsRadius(lastBandMap, w, nowX, nowY, r);
+  if (nowBands.length < 10) return null;
+
+  // Sample bands directly from prevImg pixels in radius r around (prevX, prevY).
+  const prevBands = [];
+  const data = prevImg.data;
+  const r2 = r * r;
+  const y0 = Math.max(BOM_HEADER_PX, prevY - r);
+  const y1 = Math.min(w - BOM_FOOTER_PX - 1, prevY + r);
+  const x0 = Math.max(0, prevX - r);
+  const x1 = Math.min(w - 1, prevX + r);
+  for (let y = y0; y <= y1; y++) {
+    const dy = y - prevY;
+    for (let x = x0; x <= x1; x++) {
+      const dx = x - prevX;
+      if (dx * dx + dy * dy > r2) continue;
+      const off = (y * w + x) << 2;
+      if (data[off + 3] === 0) continue;
+      const red = data[off];
+      const green = data[off + 1];
+      const blue = data[off + 2];
+      if (red === green && green === blue) continue;
+      prevBands.push(classifyIntensityBandRgb(red, green, blue));
+    }
+  }
+  if (prevBands.length < 10) return null;
+
+  nowBands.sort((a, b) => a - b);
+  prevBands.sort((a, b) => a - b);
+  const nowP75 = percentile(nowBands, 0.75);
+  const prevP75 = percentile(prevBands, 0.75);
+  const delta = nowP75 - prevP75;
+
+  if (delta >= 1.5) return 'building';
+  if (delta <= -1.5) return 'easing';
+  return 'steady';
+}
+
+/**
  * Run nowcast directly on already-fetched frames (and optionally already-decoded PNGs)
  * to avoid duplicate disk reads and PNG decodes when paired with loop rendering.
  */
@@ -759,6 +866,20 @@ function nowcastFromFrames(radarId, locations, frameEntries, opts = {}) {
     const motionKmh = motionReliable || speed > 0.1 ? Math.round(speed * kmPerPx * 60) : 0;
     const motionDir = (motionReliable && speed > 0.1) ? bearingToCompass(vectorToBearingDeg(vx, vy)) : null;
 
+    const timeline60m = buildTimeline60m(lastBandMap, w, targetPixel.x, targetPixel.y, vx, vy, rainNow, motionReliable);
+    const sparkline = timelineToSparkline(timeline60m);
+
+    // Compare against 2 frames ago (~10 min earlier) when available for a stable trend.
+    const trendRefIdx = Math.max(motionStartIdx, frames.length - 3);
+    const trendDt = trendRefIdx < frames.length - 1
+      ? (frames[frames.length - 1].tsMs && frames[trendRefIdx].tsMs
+        ? (frames[frames.length - 1].tsMs - frames[trendRefIdx].tsMs) / 60000
+        : (frames.length - 1 - trendRefIdx) * 5)
+      : 0;
+    const intensityTrend = (rainNow || etaMin !== null)
+      ? estimateIntensityTrend(imgs[trendRefIdx], lastBandMap, w, targetPixel.x, targetPixel.y, vx, vy, trendDt, rainNow, etaMin)
+      : null;
+
     out.push({
       name,
       lat: locEntry.lat,
@@ -772,6 +893,9 @@ function nowcastFromFrames(radarId, locations, frameEntries, opts = {}) {
       clearEtaMin,
       nearestRain,
       intensity,
+      intensityTrend,
+      timeline60m,
+      sparkline,
       confidence,
       motionKmh,
       motionDir,
@@ -816,6 +940,10 @@ module.exports = {
   computeFrameDeltaMin,
   estimateClearEtaMin,
   findNearestRain,
+  buildTimeline60m,
+  bandToSparkChar,
+  timelineToSparkline,
+  estimateIntensityTrend,
   nowcastFromFrames,
   nowcastLocations,
 };

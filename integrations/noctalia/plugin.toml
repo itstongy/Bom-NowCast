@@ -1,0 +1,14 @@
+id = "tongy/bom-nowcast"
+name = "BOM Nowcast"
+version = "1.0.0"
+plugin_api = 3
+author = "tongy"
+license = "MIT"
+dependencies = []
+tags = ["weather", "radar"]
+icon = "cloud-rain"
+description = "Live Australian BOM rain ETA in the bar, background cache warmer, and rain alerts."
+
+[[widget]]
+id = "radar"
+entry = "widget.luau"
